@@ -7,33 +7,30 @@ workflows:
       vars:
         APP_NAME: "VoiceMate"
         APP_ID: "com.voicemate.app"
-        XCODE_SCHEME: "VoiceMate"
     scripts:
-      - name: Install XcodeGen
-        script: |
-          brew install xcodegen
-      - name: Generate Xcode Project & Build
+      - name: Generate xcodeproj and build
         script: |
           set -e
           cd iOS
-          xcodegen generate
           
-          # Build without any code signing
+          # Generate xcodeproj from Swift Package
+          swift package generate-xcodeproj
+          
+          # Build without signing
           xcodebuild -project "VoiceMate.xcodeproj" \
-            -scheme "$XCODE_SCHEME" \
+            -scheme "VoiceMate" \
             -configuration Release \
             -destination generic/platform=iOS \
             -derivedDataPath ../build \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
-            OTHER_CODE_SIGN_FLAGS="--no-strict" \
             clean build
           
           # Create unsigned IPA
-          cd ../build/Build/Products/Release-iphoneos
-          mkdir -p Payload
-          cp -r "VoiceMate.app" Payload/
-          zip -r "../../../iOS/VoiceMate.ipa" Payload/
+          mkdir -p build/Payload
+          cp -r "../build/Build/Products/Release-iphoneos/VoiceMate.app" build/Payload/
+          cd build
+          zip -r "../$APP_NAME.ipa" Payload/
     artifacts:
       - iOS/VoiceMate.ipa
