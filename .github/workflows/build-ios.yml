@@ -1,0 +1,58 @@
+# VoiceMate iOS Build
+# Uses Codemagic (free tier, no Mac needed) to compile the iOS app into .ipa
+# 
+# Setup:
+# 1. Push this repo to GitHub
+# 2. Go to https://codemagic.io/start and sign in with GitHub
+# 3. Add your Apple Developer account (free or paid) in Codemagic settings
+# 4. The .ipa will be built automatically on every push
+# 5. Download the .ipa from Codemagic and install with TrollStore
+
+name: Build iOS App
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:  # Manual trigger
+
+jobs:
+  build:
+    name: Build with Codemagic
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '15.4'
+      
+      - name: Build iOS App
+        run: |
+          cd iOS
+          xcodebuild -project VoiceMate.xcodeproj \
+            -scheme VoiceMate \
+            -configuration Release \
+            -archivePath build/VoiceMate.xcarchive \
+            -destination 'generic/platform=iOS' \
+            archive
+          
+          xcodebuild -exportArchive \
+            -archivePath build/VoiceMate.xcarchive \
+            -exportPath build/ \
+            -exportOptionsPlist exportOptions.plist
+      
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: VoiceMate.ipa
+          path: iOS/build/VoiceMate.ipa
+          if-no-files-found: warn
+          
+      - name: Upload Debug Symbols (optional)
+        uses: actions/upload-artifact@v4
+        with:
+          name: dSYMs
+          path: iOS/build/VoiceMate.xcarchive/dSYMs

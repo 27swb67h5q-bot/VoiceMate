@@ -1,0 +1,32 @@
+name: VoiceMate
+options:
+  bundleIdPrefix: com.voicemate
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "15.4"
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    TARGETED_DEVICE_FAMILY: "1"  # iPhone only
+    INFOPLIST_FILE: "VoiceMate/Resources/Info.plist"
+    DEVELOPMENT_TEAM: ""  # Leave empty for TrollStore (unsigned)
+
+targets:
+  VoiceMate:
+    type: application
+    platform: iOS
+    sources:
+      - path: VoiceMate
+    info:
+      path: VoiceMate/Resources/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.voicemate.app
+        PRODUCT_NAME: VoiceMate
+        INFOPLIST_FILE: VoiceMate/Resources/Info.plist
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: ""
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGNING_ALLOWED: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
