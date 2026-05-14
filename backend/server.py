@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -227,6 +227,114 @@ async def get_audio(audio_id: str):
             "Cache-Control": "public, max-age=3600",
         },
     )
+
+
+# ── ASR Engine (faster-whisper) ──────────────────────────────────────────────
+
+class ASREngine:
+    def __init__(self):
+        self.model = None
+        self.model_size = os.environ.get("VOICEMATE_ASR_MODEL", "base")
+
+    async def transcribe(self, audio_path: str) -> str:
+        """Transcribe audio file to text using faster-whisper."""
+        try:
+            from faster_whisper import WhisperModel
+
+            if self.model is None:
+                logger.info(f"Loading faster-whisper model '{self.model_size}'...")
+                # Run model loading in a thread to avoid blocking
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    self.model = await asyncio.get_event_loop().run_in_executor(
+                        pool, lambda: WhisperModel(self.model_size, device="cpu", compute_type="int8")
+                    )
+                logger.info("Whisper model loaded")
+
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                segments, info = await asyncio.get_event_loop().run_in_executor(
+                    pool, lambda: self.model.transcribe(audio_path, language="zh", beam_size=5)
+                )
+                result = "".join(seg.text for seg in segments)
+                logger.info(f"ASR: {result[:80]}")
+                return result.strip()
+        except Exception as e:
+            logger.error(f"ASR failed: {e}")
+            # Fallback: try OpenAI Whisper API if available
+            openai_key = os.environ.get("VOICE_TOOLS_OPENAI_KEY", "")
+            if openai_key:
+                try:
+                    import openai
+                    client = openai.OpenAI(api_key=openai_key)
+                    with open(audio_path, "rb") as f:
+                        transcript = client.audio.transcriptions.create(
+                            model="whisper-1",
+                            file=f,
+                            language="zh",
+                        )
+                        return transcript.text.strip()
+                except Exception as e2:
+                    logger.error(f"OpenAI ASR fallback also failed: {e2}")
+            return ""
+
+
+# ── Uploaded Audio → ASR → Chat → TTS ──────────────────────────────────────
+
+@app.post("/v1/voice-chat")
+async def voice_chat(
+    audio: UploadFile = File(...),
+    conversation_id: Optional[str] = Form(None),
+):
+    """Receive voice recording, transcribe, chat, reply with audio."""
+    logger.info(f"Voice chat request: {audio.filename} ({conversation_id or 'new'})")
+
+    # Save uploaded audio
+    ext = os.path.splitext(audio.filename or "audio.webm")[1] or ".webm"
+    audio_id = str(uuid.uuid4())[:8]
+    input_path = str(AUDIO_DIR / f"input_{audio_id}{ext}")
+
+    content = await audio.read()
+    with open(input_path, "wb") as f:
+        f.write(content)
+
+    # Convert to wav for whisper if needed
+    wav_path = str(AUDIO_DIR / f"input_{audio_id}.wav")
+    import subprocess
+    subprocess.run([
+        "ffmpeg", "-y", "-i", input_path,
+        "-ar", "16000", "-ac", "1", "-sample_fmt", "s16",
+        wav_path
+    ], capture_output=True)
+
+    logger.info(f"Audio saved: {input_path}, converted: {wav_path}")
+
+    # Transcribe
+    asr_engine = ASREngine()
+    text = await asr_engine.transcribe(wav_path)
+
+    if not text:
+        return {"error": "无法识别语音内容", "reply_text": "抱歉，我没有听清楚你说什么", "audio_url": ""}
+
+    logger.info(f"Transcribed: {text[:100]}")
+
+    # Chat
+    reply = await deepseek.chat(text, conversation_id)
+
+    # TTS
+    audio_path, duration_ms = await tts.synthesize(reply)
+
+    conv_id = conversation_id or str(uuid.uuid4())
+    audio_filename = os.path.basename(audio_path)
+    audio_url = f"/v1/audio/{audio_filename}"
+
+    return {
+        "reply_text": reply,
+        "audio_url": audio_url,
+        "conversation_id": conv_id,
+        "duration_ms": duration_ms,
+        "transcribed_text": text,
+    }
 
 
 # ── WebSocket for Real-Time Voice (Future) ──────────────────────────────────

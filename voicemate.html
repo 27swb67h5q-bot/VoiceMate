@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="VoiceMate">
+<link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='80' font-size='80'>🎙️</text></svg>">
+<title>VoiceMate</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+  --bg: #000;
+  --surface: #1c1c1e;
+  --bubble-user: #7c3aed;
+  --bubble-ai: #2c2c2e;
+  --text: #fff;
+  --text-sec: #8e8e93;
+  --accent: #7c3aed;
+}
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh; height: 100dvh;
+  display: flex; flex-direction: column; overflow: hidden;
+  -webkit-user-select: none; user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.status-bar { height: env(safe-area-inset-top, 20px); background: var(--bg); flex-shrink: 0; }
+.header {
+  padding: 12px 16px;
+  display: flex; align-items: center; justify-content: space-between;
+  border-bottom: 1px solid #2c2c2e; flex-shrink: 0;
+}
+.header h1 {
+  font-size: 18px; font-weight: 700;
+  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.header .status {
+  display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-sec);
+}
+.header .status-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: #30d158;
+}
+.header .status-dot.disconnected { background: #8e8e93; }
+.header .status-dot.processing { background: #ff9f0a; animation: pulse 0.8s infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+.messages {
+  flex: 1; overflow-y: auto; padding: 16px;
+  display: flex; flex-direction: column; gap: 12px;
+  -webkit-overflow-scrolling: touch;
+}
+.empty-state {
+  flex: 1; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 16px; color: var(--text-sec);
+}
+.empty-state .icon { font-size: 64px; opacity: 0.4; }
+.empty-state .title { font-size: 18px; font-weight: 600; }
+.empty-state .sub { font-size: 14px; }
+.msg { display: flex; flex-direction: column; max-width: 80%; gap: 4px; }
+.msg.user { align-self: flex-end; }
+.msg.ai { align-self: flex-start; }
+.msg-bubble {
+  padding: 12px 16px; border-radius: 18px;
+  font-size: 15px; line-height: 1.5; word-break: break-word;
+}
+.msg.user .msg-bubble { background: var(--bubble-user); border-bottom-right-radius: 4px; }
+.msg.ai .msg-bubble { background: var(--bubble-ai); border-bottom-left-radius: 4px; }
+.msg-meta { font-size: 11px; color: var(--text-sec); padding: 0 4px; }
+.msg.user .msg-meta { text-align: right; }
+
+.play-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  margin-top: 8px; padding: 6px 14px;
+  background: var(--accent); border: none; border-radius: 20px;
+  color: #fff; font-size: 13px; cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.play-btn:active { opacity: 0.7; }
+.play-btn .wave {
+  display: flex; align-items: center; gap: 2px; height: 16px;
+}
+
+/* Input area */
+.input-bar {
+  padding: 8px 12px;
+  padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid #2c2c2e;
+  display: flex; align-items: flex-end; gap: 8px;
+  flex-shrink: 0; background: var(--bg);
+}
+.input-field {
+  flex: 1;
+  background: var(--surface);
+  border: 1px solid #3a3a3c;
+  border-radius: 20px;
+  padding: 10px 16px;
+  color: var(--text);
+  font-size: 16px;
+  outline: none;
+  min-height: 40px;
+  max-height: 100px;
+  font-family: inherit;
+  resize: none;
+}
+.input-field:focus { border-color: var(--accent); }
+.input-field::placeholder { color: #555; }
+.send-btn {
+  width: 44px; height: 44px;
+  border-radius: 50%;
+  border: none;
+  background: var(--accent);
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; flex-shrink: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+.send-btn:active { opacity: 0.7; }
+.send-btn:disabled { opacity: 0.3; }
+.send-btn svg { width: 22px; height: 22px; fill: #fff; }
+
+/* Settings */
+.settings-overlay {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.8); backdrop-filter: blur(20px);
+  z-index: 100; display: none; flex-direction: column;
+  padding: 20px; padding-top: calc(60px + env(safe-area-inset-top, 20px));
+}
+.settings-overlay.open { display: flex; }
+.settings-overlay h2 { font-size: 22px; font-weight: 700; margin-bottom: 20px; }
+.settings-group { margin-bottom: 20px; }
+.settings-group label { font-size: 13px; color: var(--text-sec); display: block; margin-bottom: 6px; }
+.settings-group input {
+  width: 100%; padding: 12px 16px; background: var(--surface);
+  border: 1px solid #3a3a3c; border-radius: 12px;
+  color: var(--text); font-size: 16px; outline: none;
+}
+.settings-group input:focus { border-color: var(--accent); }
+.btn { padding: 14px; border: none; border-radius: 12px; font-size: 16px; font-weight: 600; cursor: pointer; width: 100%; }
+.btn-primary { background: var(--accent); color: #fff; }
+.btn-primary:active { opacity: 0.8; }
+.btn-secondary { background: var(--surface); color: var(--text); }
+.settings-close { position: absolute; top: calc(12px + env(safe-area-inset-top, 20px)); right: 16px; font-size: 28px; background: none; border: none; color: var(--text); cursor: pointer; padding: 8px; }
+.settings-btn { background: none; border: none; color: var(--text-sec); font-size: 22px; cursor: pointer; padding: 4px; }
+.messages::-webkit-scrollbar { width: 3px; }
+.messages::-webkit-scrollbar-track { background: transparent; }
+.messages::-webkit-scrollbar-thumb { background: #3a3a3c; border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<div class="status-bar"></div>
+<div class="header">
+  <h1>VoiceMate</h1>
+  <div class="status">
+    <span class="status-dot" id="statusDot"></span>
+    <span id="statusText">连接中...</span>
+  </div>
+  <button class="settings-btn" onclick="toggleSettings()">⚙️</button>
+</div>
+
+<div class="messages" id="messages">
+  <div class="empty-state" id="emptyState">
+    <div class="icon">🎙️</div>
+    <div class="title">开始聊天</div>
+    <div class="sub">在下方输入文字，AI 会用语音回复你</div>
+  </div>
+</div>
+
+<div class="input-bar">
+  <textarea class="input-field" id="textInput" placeholder="输入消息..." rows="1" oninput="autoResize(this)"></textarea>
+  <button class="send-btn" id="sendBtn" onclick="sendText()">
+    <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+  </button>
+</div>
+
+<div class="settings-overlay" id="settingsOverlay">
+  <button class="settings-close" onclick="toggleSettings()">✕</button>
+  <h2>设置</h2>
+  <div class="settings-group">
+    <label>服务器地址</label>
+    <input type="text" id="serverHost" placeholder="192.168.1.100">
+  </div>
+  <div class="settings-group">
+    <label>端口</label>
+    <input type="text" id="serverPort" placeholder="8000" inputmode="numeric">
+  </div>
+  <button class="btn btn-primary" onclick="saveSettings()">保存并测试连接</button>
+  <div style="height: 12px"></div>
+  <button class="btn btn-secondary" onclick="toggleSettings()">取消</button>
+</div>
+
+<script>
+// ==================== CONFIG ====================
+const CONFIG = {
+  host: localStorage.getItem('vm_host') || '192.168.10.198',
+  port: localStorage.getItem('vm_port') || '8000',
+};
+document.getElementById('serverHost').value = CONFIG.host;
+document.getElementById('serverPort').value = CONFIG.port;
+const BASE_URL = () => `http://${CONFIG.host}:${CONFIG.port}`;
+
+let conversationId = null;
+let isProcessing = false;
+
+// ==================== UI ====================
+function $(id) { return document.getElementById(id); }
+
+function updateStatus(state) {
+  const dot = $('statusDot'); const text = $('statusText');
+  dot.className = 'status-dot';
+  if (state === 'connected') { dot.classList.add('connected'); text.textContent = '已连接'; }
+  else if (state === 'processing') { dot.classList.add('processing'); text.textContent = '思考中...'; }
+  else { dot.classList.add('disconnected'); text.textContent = '未连接'; }
+}
+
+function autoResize(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 100) + 'px';
+  $('sendBtn').disabled = !el.value.trim();
+}
+
+function scrollBottom() {
+  $('messages').scrollTop = $('messages').scrollHeight;
+}
+
+function addMessage(text, isUser, audioUrl) {
+  const container = $('messages');
+  const empty = $('emptyState');
+  if (empty) empty.remove();
+
+  const msgDiv = document.createElement('div');
+  msgDiv.className = `msg ${isUser ? 'user' : 'ai'}`;
+  const bubble = document.createElement('div');
+  bubble.className = 'msg-bubble';
+  bubble.textContent = text;
+  msgDiv.appendChild(bubble);
+
+  const meta = document.createElement('div');
+  meta.className = 'msg-meta';
+  meta.textContent = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+  msgDiv.appendChild(meta);
+
+    if (!isUser && audioUrl) {
+      const playBtn = document.createElement('button');
+      playBtn.className = 'play-btn';
+      playBtn.innerHTML = `<div class="wave">🔊</div> 重播`;
+      playBtn.onclick = () => { new Audio(audioUrl).play().catch(() => {}); };
+      msgDiv.appendChild(playBtn);
+
+      // Auto-play AI voice reply
+      setTimeout(() => {
+        new Audio(audioUrl).play().catch(() => {});
+      }, 300);
+    }
+
+  container.appendChild(msgDiv);
+  scrollBottom();
+}
+
+// ==================== SEND TEXT ====================
+async function sendText() {
+  const input = $('textInput');
+  const text = input.value.trim();
+  if (!text || isProcessing) return;
+
+  input.value = '';
+  input.style.height = 'auto';
+  $('sendBtn').disabled = true;
+  isProcessing = true;
+  updateStatus('processing');
+
+  addMessage(text, true, null);
+
+  try {
+    const ctrl = new AbortController();
+    const timeout = setTimeout(() => ctrl.abort(), 30000);
+
+    const res = await fetch(`${BASE_URL()}/v1/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: text,
+        conversation_id: conversationId || undefined,
+      }),
+      signal: ctrl.signal,
+    });
+    clearTimeout(timeout);
+
+    if (!res.ok) { addMessage(`服务器错误: ${res.status}`, false, null); updateStatus('connected'); return; }
+
+    const data = await res.json();
+    conversationId = data.conversation_id;
+    const audioUrl = `${BASE_URL()}${data.audio_url}`;
+    addMessage(data.reply_text, false, audioUrl);
+
+    setTimeout(() => { new Audio(audioUrl).play().catch(() => {}); }, 300);
+    updateStatus('connected');
+  } catch (err) {
+    if (err.name === 'AbortError') addMessage('请求超时，请重试', false, null);
+    else addMessage(`连接失败: ${err.message}`, false, null);
+    updateStatus('disconnected');
+  }
+
+  isProcessing = false;
+}
+
+// Enter to send
+document.addEventListener('DOMContentLoaded', () => {
+  $('textInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendText(); }
+  });
+  autoResize($('textInput'));
+});
+
+// ==================== SETTINGS ====================
+function toggleSettings() { $('settingsOverlay').classList.toggle('open'); }
+function saveSettings() {
+  CONFIG.host = $('serverHost').value.trim() || CONFIG.host;
+  CONFIG.port = $('serverPort').value.trim() || CONFIG.port;
+  localStorage.setItem('vm_host', CONFIG.host);
+  localStorage.setItem('vm_port', CONFIG.port);
+  checkConnection(); toggleSettings();
+}
+
+// ==================== CONNECTION ====================
+async function checkConnection() {
+  updateStatus('connecting');
+  try {
+    const ctrl = new AbortController();
+    const timeout = setTimeout(() => ctrl.abort(), 5000);
+    const res = await fetch(`${BASE_URL()}/v1/health`, { signal: ctrl.signal });
+    clearTimeout(timeout);
+    if (res.ok) { updateStatus('connected'); return true; }
+  } catch(e) {}
+  updateStatus('disconnected'); return false;
+}
+
+checkConnection();
+</script>
+</body>
+</html>

@@ -1,51 +1,38 @@
-# VoiceMate - Codemagic Configuration
-# Codemagic is a free CI/CD service that can build iOS apps without a Mac
-# Sign up at https://codemagic.io/start
-#
-# Setup:
-# 1. Push this repo to GitHub
-# 2. Go to codemagic.io → Add application → Select this repo
-# 3. In "Build for platforms": iOS → iOS App Archive (.ipa)
-# 4. Go to Team > Integrations > Apple Developer Portal → Add your Apple ID
-# 5. Push code → Codemagic auto-builds → Download .ipa → Install with TrollStore
-
 workflows:
   ios-build:
     name: VoiceMate iOS
     instance_type: mac_mini_m2
     max_build_duration: 30
     environment:
-      ios_signing:
-        provisioning_profile: auto  # Codemagic handles signing
-        certificates: auto
       vars:
         APP_NAME: "VoiceMate"
         APP_ID: "com.voicemate.app"
-        XCODE_WORKSPACE: ""  # No workspace, using project directly
         XCODE_SCHEME: "VoiceMate"
     scripts:
-      - name: Build IPA
+      - name: Install XcodeGen
+        script: |
+          brew install xcodegen
+      - name: Generate Xcode Project
         script: |
           cd iOS
-          xcodebuild build \
-            -project "VoiceMate.xcodeproj" \
+          xcodegen generate
+      - name: Build unsigned IPA
+        script: |
+          cd iOS
+          xcodebuild -project "VoiceMate.xcodeproj" \
             -scheme "$XCODE_SCHEME" \
             -configuration Release \
             -destination generic/platform=iOS \
             -derivedDataPath ../build \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO
-          
-          # Create .app bundle
+            CODE_SIGNING_ALLOWED=NO \
+            clean build
           mkdir -p Payload
           cp -r "../build/Build/Products/Release-iphoneos/VoiceMate.app" Payload/
-          
-          # Package as .ipa (unsigned - for TrollStore)
           zip -r "VoiceMate.ipa" Payload/
     artifacts:
       - iOS/VoiceMate.ipa
     publishing:
       email:
-        recipients:
-          - your@email.com  # Optional: get notified when build is done
+        recipients: []

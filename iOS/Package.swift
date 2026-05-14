@@ -1,4 +1,4 @@
-// swift-tools-version: 5.9
+// Swift-tools-version:5.9
 import PackageDescription
 
 let package = Package(
@@ -6,12 +6,17 @@ let package = Package(
     platforms: [
         .iOS(.v16)
     ],
-    dependencies: [],
+    dependencies: [
+    ],
     targets: [
-        .target(
+        .executableTarget(
             name: "VoiceMate",
             dependencies: [],
-            path: "Sources/VoiceMate"
+            path: ".",
+            exclude: ["Info.plist", "project.yml"],
+            swiftSettings: [
+                .unsafeFlags(["-parse-as-library"])
+            ]
         )
     ]
 )
