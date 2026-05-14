@@ -12,13 +12,13 @@ workflows:
       - name: Install XcodeGen
         script: |
           brew install xcodegen
-      - name: Generate Xcode Project
+      - name: Generate Xcode Project & Build
         script: |
+          set -e
           cd iOS
           xcodegen generate
-      - name: Build unsigned IPA
-        script: |
-          cd iOS
+          
+          # Build without any code signing
           xcodebuild -project "VoiceMate.xcodeproj" \
             -scheme "$XCODE_SCHEME" \
             -configuration Release \
@@ -27,12 +27,13 @@ workflows:
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
+            OTHER_CODE_SIGN_FLAGS="--no-strict" \
             clean build
+          
+          # Create unsigned IPA
+          cd ../build/Build/Products/Release-iphoneos
           mkdir -p Payload
-          cp -r "../build/Build/Products/Release-iphoneos/VoiceMate.app" Payload/
-          zip -r "VoiceMate.ipa" Payload/
+          cp -r "VoiceMate.app" Payload/
+          zip -r "../../../iOS/VoiceMate.ipa" Payload/
     artifacts:
       - iOS/VoiceMate.ipa
-    publishing:
-      email:
-        recipients: []
