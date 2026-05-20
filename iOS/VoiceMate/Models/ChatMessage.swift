@@ -4,7 +4,7 @@ import Foundation
 struct ChatMessage: Identifiable, Codable {
     let id: UUID
     let isUser: Bool
-    let text: String
+    var text: String
     let audioURL: String?
     let timestamp: Date
     var isPlaying: Bool = false

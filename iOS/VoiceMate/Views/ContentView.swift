@@ -83,10 +83,11 @@ struct ContentView: View {
                         ForEach(messages) { message in
                             if message.id == streamingMessageId {
                                 MessageBubble(message: message, voiceService: voiceService, streamingText: voiceService.streamingText)
+                                    .id(message.id)
                             } else {
                                 MessageBubble(message: message, voiceService: voiceService, streamingText: nil)
+                                    .id(message.id)
                             }
-                            .id(message.id)
                         }
                     }
                 }
