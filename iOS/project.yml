@@ -18,11 +18,13 @@ targets:
     platform: iOS
     sources:
       - path: VoiceMate
+      - path: VoiceMate/Resources/Assets.xcassets
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.voicemate.app
         PRODUCT_NAME: VoiceMate
         INFOPLIST_FILE: VoiceMate/Resources/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_STYLE: Manual
         CODE_SIGN_IDENTITY: ""
         CODE_SIGNING_REQUIRED: NO
