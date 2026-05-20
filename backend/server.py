@@ -570,11 +570,22 @@ async def get_audio(audio_id: str):
     if not audio_path.exists():
         audio_path = AUDIO_DIR / f"{audio_id}.mp3"
     if not audio_path.exists():
+        audio_path = AUDIO_DIR / f"{audio_id}.wav"
+    if not audio_path.exists():
         raise HTTPException(status_code=404, detail="Audio not found")
+
+    # Determine correct MIME type from file extension
+    path_str = str(audio_path).lower()
+    if path_str.endswith(".wav"):
+        media_type = "audio/wav"
+    elif path_str.endswith(".mp3"):
+        media_type = "audio/mpeg"
+    else:
+        media_type = "audio/mpeg"
 
     return FileResponse(
         str(audio_path),
-        media_type="audio/mpeg",
+        media_type=media_type,
         headers={
             "Content-Disposition": f'inline; filename="voicemate_{audio_id}"',
             "Cache-Control": "public, max-age=3600",
