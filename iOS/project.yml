@@ -18,7 +18,6 @@ targets:
     platform: iOS
     sources:
       - path: VoiceMate
-      - path: VoiceMate/Resources/Assets.xcassets
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.voicemate.app
