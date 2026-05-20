@@ -432,8 +432,7 @@ struct ContentView: View {
         proactiveTimer?.invalidate()
         let interval: TimeInterval = proactiveEnabled ? 180 : 0 // 3 minutes
         guard interval > 0 else { return }
-        proactiveTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            guard let self = self, self.proactiveEnabled else { return }
+        proactiveTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { _ in
             Task { await self.fireProactive() }
         }
     }

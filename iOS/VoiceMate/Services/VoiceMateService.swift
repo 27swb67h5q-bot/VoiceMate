@@ -166,7 +166,8 @@ class VoiceMateService: ObservableObject {
             case "token":
                 if let content = json["content"] as? String {
                     fullText += content
-                    await MainActor.run { self.streamingText = fullText }
+                    let text = fullText
+                    await MainActor.run { self.streamingText = text }
                 }
             case "done":
                 audioUrl = json["audio_url"] as? String ?? ""
