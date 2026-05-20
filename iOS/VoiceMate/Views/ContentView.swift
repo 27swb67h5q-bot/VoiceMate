@@ -393,7 +393,7 @@ struct ContentView: View {
         } catch {
             await MainActor.run { streamingMessageId = nil }
             if let idx = messages.firstIndex(where: { $0.id == aiId }) {
-                await MainActor.run { messages.remove(at: idx) }
+                _ = await MainActor.run { messages.remove(at: idx) }
             }
             if let fb = try? await voiceService.sendMessage(text: text, conversationId: conversationId) {
                 await MainActor.run {

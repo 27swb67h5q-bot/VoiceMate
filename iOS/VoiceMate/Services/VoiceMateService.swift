@@ -143,9 +143,10 @@ class VoiceMateService: ObservableObject {
                         audioUrl = json["audio_url"] as? String ?? ""
                         resultConvId = json["conversation_id"] as? String ?? resultConvId
                         durationMs = json["duration_ms"] as? Int ?? 0
+                        let emotion = json["emotion"] as? String
                         task.cancel(with: .normalClosure, reason: nil)
                         self.wsTask = nil
-                        return ChatResponse(replyText: fullText, audioUrl: audioUrl, conversationId: resultConvId, durationMs: durationMs)
+                        return ChatResponse(replyText: fullText, audioUrl: audioUrl, conversationId: resultConvId, durationMs: durationMs, emotion: emotion)
                     case "error":
                         throw VoiceMateError.serverError(statusCode: 0, body: json["message"] as? String ?? "WS error")
                     default:
@@ -160,9 +161,10 @@ class VoiceMateService: ObservableObject {
                     resultConvId = json["conversation_id"] as? String ?? resultConvId
                     durationMs = json["duration_ms"] as? Int ?? 0
                     fullText = json["full_text"] as? String ?? fullText
+                    let emotion = json["emotion"] as? String
                     task.cancel(with: .normalClosure, reason: nil)
                     self.wsTask = nil
-                    return ChatResponse(replyText: fullText, audioUrl: audioUrl, conversationId: resultConvId, durationMs: durationMs)
+                    return ChatResponse(replyText: fullText, audioUrl: audioUrl, conversationId: resultConvId, durationMs: durationMs, emotion: emotion)
                 }
             @unknown default:
                 break
