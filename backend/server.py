@@ -91,6 +91,34 @@ class ChatResponse(BaseModel):
     duration_ms: int
 
 
+# ── History Manager (conversation memory) ──────────────────────────────────────
+
+class HistoryManager:
+    """Persists conversation history to disk for context memory."""
+    def __init__(self, history_dir="/root/.hermes/voicemate_history"):
+        self.history_dir = Path(history_dir)
+        self.history_dir.mkdir(parents=True, exist_ok=True)
+
+    def _file_path(self, conv_id):
+        return self.history_dir / f"{conv_id}.json"
+
+    def load(self, conv_id):
+        path = self._file_path(conv_id)
+        if path.exists():
+            return json.loads(path.read_text())
+        return []
+
+    def append(self, conv_id, user_msg, assistant_msg):
+        history = self.load(conv_id)
+        history.append({"role": "user", "content": user_msg})
+        history.append({"role": "assistant", "content": assistant_msg})
+        if len(history) > 40:
+            history = history[-40:]
+        path = self._file_path(conv_id)
+        path.write_text(json.dumps(history, ensure_ascii=False, indent=2))
+        return history
+
+
 # ── DeepSeek Client ─────────────────────────────────────────────────────────
 
 class DeepSeekClient:
@@ -105,12 +133,14 @@ class DeepSeekClient:
             base_url=self.base_url,
         )
 
-    async def chat(self, text: str, conversation_id: Optional[str] = None) -> str:
+    async def chat(self, text: str, conversation_id: Optional[str] = None, history: list = None) -> str:
         """Send a message to DeepSeek and get reply text."""
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": text},
         ]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": text})
 
         start = time.time()
         try:
@@ -167,6 +197,7 @@ class TTSEngine:
 
 deepseek = DeepSeekClient()
 tts = TTSEngine()
+history = HistoryManager()
 
 # In-memory conversation store (simple for MVP, will persist later)
 conversations: dict[str, list[dict]] = {}
@@ -198,10 +229,14 @@ async def chat(request: ChatRequest):
 
     logger.info(f"Chat request [{conv_id}]: {request.text[:80]}")
 
-    # 1. Get AI reply
-    reply = await deepseek.chat(request.text, conv_id)
+    # 1. Load conversation history and get AI reply
+    conv_history = history.load(conv_id)
+    reply = await deepseek.chat(request.text, conv_id, history=conv_history)
 
-    # 2. Generate TTS audio (use requested voice if provided)
+    # 2. Save to history
+    history.append(conv_id, request.text, reply)
+
+    # 3. Generate TTS audio (use requested voice if provided)
     if request.voice:
         tts.voice = request.voice
     audio_path, duration_ms = await tts.synthesize(reply)
