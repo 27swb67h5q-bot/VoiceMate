@@ -15,6 +15,7 @@ struct ContentView: View {
     @State private var inputMode: InputMode = .voice
     @State private var textInput: String = ""
     @State private var streamingMessageId: UUID? = nil
+    @State private var showPlusMenu = false
     
     enum InputMode {
         case text, voice
@@ -66,6 +67,8 @@ struct ContentView: View {
         .preferredColorScheme(.dark)
         // Recording overlay (WeChat style)
         .overlay(recordingOverlay)
+        // Tap background to dismiss keyboard
+        .onTapGesture { UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil) }
     }
     
     // MARK: - Messages List
@@ -127,11 +130,17 @@ struct ContentView: View {
             Divider().background(Color.gray.opacity(0.3))
             
             HStack(spacing: 8) {
-                // "+" button
-                Button(action: {}) {
+                // "+" button with menu
+                Button(action: { showPlusMenu = true }) {
                     Image(systemName: "plus.circle.fill")
                         .font(.title2)
                         .foregroundColor(.gray)
+                }
+                .confirmationDialog("更多功能", isPresented: $showPlusMenu) {
+                    Button("实时通话", systemImage: "phone.fill") { }
+                    Button("取消", role: .cancel) { }
+                } message: {
+                    Text("选择功能")
                 }
                 
                 if inputMode == .text {
