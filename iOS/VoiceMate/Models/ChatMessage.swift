@@ -5,7 +5,7 @@ struct ChatMessage: Identifiable, Codable {
     let id: UUID
     let isUser: Bool
     var text: String
-    let audioURL: String?
+    var audioURL: String?
     let timestamp: Date
     var isPlaying: Bool = false
     var duration: TimeInterval = 0
