@@ -298,6 +298,16 @@ class ChatTTSEngine:
         audio_id = str(uuid.uuid4())[:8]
         output_path = str(AUDIO_DIR / f"{audio_id}.wav")
         sf.write(output_path, wavs[0].T, 24000)
+        
+        # Convert to 16-bit PCM for iOS AVAudioPlayer compatibility
+        import subprocess
+        pcm_path = str(AUDIO_DIR / f"{audio_id}_pcm.wav")
+        subprocess.run([
+            "ffmpeg", "-y", "-i", output_path,
+            "-acodec", "pcm_s16le", "-ar", "24000", "-ac", "1",
+            pcm_path
+        ], capture_output=True)
+        os.replace(pcm_path, output_path)
 
         duration_ms = max(int((wavs[0].shape[1] / 24000) * 1000), 1000)
         logger.info(f"ChatTTS [{emotion}] in {elapsed:.2f}s -> {output_path}")
