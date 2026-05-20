@@ -94,9 +94,10 @@ class VoiceMateService: ObservableObject {
     func playAudio(from url: URL) async throws {
         let (data, _) = try await session.data(from: url)
         
+        let ext = url.lastPathComponent.hasSuffix(".wav") ? "wav" : "mp3"
         let tempURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension("mp3")
+            .appendingPathExtension(ext)
         
         try data.write(to: tempURL)
         
