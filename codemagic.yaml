@@ -12,6 +12,9 @@ workflows:
           set -e -x
           cd iOS
           
+          # Install xcodegen if not present
+          which xcodegen >/dev/null 2>&1 || brew install xcodegen
+          
           # Generate Xcode project from project.yml
           xcodegen generate
           
