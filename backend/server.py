@@ -22,8 +22,12 @@ import time
 from pathlib import Path
 from typing import Optional
 
+# Load .env file if present
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
@@ -172,6 +176,15 @@ conversations: dict[str, list[dict]] = {}
 @app.get("/v1/health")
 async def health():
     return {"status": "ok", "service": "voicemate", "version": "1.0.0"}
+
+
+@app.get("/", response_class=HTMLResponse)
+async def web_ui():
+    """Serve the VoiceMate web chat interface."""
+    html_path = Path(__file__).parent.parent / "voicemate.html"
+    if html_path.exists():
+        return HTMLResponse(content=html_path.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>VoiceMate API</h1><p>Web UI not found.</p>")
 
 
 @app.post("/v1/chat", response_model=ChatResponse)

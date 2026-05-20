@@ -9,6 +9,7 @@ settings:
   base:
     SWIFT_VERSION: "5.9"
     TARGETED_DEVICE_FAMILY: "1"  # iPhone only
+    ARCHS: arm64
     INFOPLIST_FILE: "VoiceMate/Resources/Info.plist"
     DEVELOPMENT_TEAM: ""  # Leave empty for TrollStore (unsigned)
 
