@@ -6,31 +6,31 @@ workflows:
     environment:
       vars:
         APP_NAME: "VoiceMate"
-        APP_ID: "com.voicemate.app"
     scripts:
-      - name: Generate xcodeproj and build
+      - name: Build unsigned IPA for TrollStore
         script: |
-          set -e
+          set -e -x
           cd iOS
           
-          # Generate xcodeproj from Swift Package
-          swift package generate-xcodeproj
+          # Generate Xcode project from project.yml
+          xcodegen generate
           
-          # Build without signing
-          xcodebuild -project "VoiceMate.xcodeproj" \
+          # Build for iOS device (unsigned)
+          xcodebuild \
+            -project "VoiceMate.xcodeproj" \
             -scheme "VoiceMate" \
             -configuration Release \
-            -destination generic/platform=iOS \
+            -sdk iphoneos \
             -derivedDataPath ../build \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             clean build
           
-          # Create unsigned IPA
-          mkdir -p build/Payload
-          cp -r "../build/Build/Products/Release-iphoneos/VoiceMate.app" build/Payload/
-          cd build
-          zip -r "../$APP_NAME.ipa" Payload/
+          # Create IPA for TrollStore
+          mkdir -p output/Payload
+          cp -r "../build/Build/Products/Release-iphoneos/VoiceMate.app" output/Payload/
+          cd output
+          zip -r "../${APP_NAME}.ipa" Payload/
     artifacts:
       - iOS/VoiceMate.ipa
