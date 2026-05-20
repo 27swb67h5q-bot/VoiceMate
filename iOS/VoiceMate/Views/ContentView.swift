@@ -8,27 +8,39 @@ struct ContentView: View {
     @State private var conversationId: String?
     @State private var showSettings = false
     @State private var showConnectionError = false
+    @State private var inputMode: InputMode = .voice  // .text or .voice
+    @State private var textInput: String = ""
+    
+    enum InputMode {
+        case text, voice
+    }
     
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                // Connection status bar
-                connectionBar
-                
                 // Messages area
                 messagesList
                 
-                // Recording area
-                recordingArea
+                // Bottom input bar (WeChat style)
+                inputBar
             }
-            .background(Color.black)
+            .background(Color(.systemGroupedBackground))
             .navigationTitle("VoiceMate")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(.visible, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(action: { showSettings = true }) {
-                        Image(systemName: "gear")
-                            .foregroundColor(.purple)
+                    HStack(spacing: 12) {
+                        // Connection status dot
+                        Circle()
+                            .fill(voiceService.isProcessing ? Color.yellow :
+                                  messages.isEmpty ? Color.gray : Color.green)
+                            .frame(width: 8, height: 8)
+                        
+                        Button(action: { showSettings = true }) {
+                            Image(systemName: "gearshape.fill")
+                                .foregroundColor(.gray)
+                        }
                     }
                 }
             }
@@ -48,40 +60,23 @@ struct ContentView: View {
         .preferredColorScheme(.dark)
     }
     
-    // MARK: - Connection Bar
-    
-    private var connectionBar: some View {
-        HStack {
-            Circle()
-                .fill(voiceService.isProcessing ? Color.yellow :
-                      messages.isEmpty ? Color.gray : Color.green)
-                .frame(width: 8, height: 8)
-            Text(voiceService.isProcessing ? "处理中..." :
-                 messages.isEmpty ? "点击录音开始聊天" : "已连接")
-                .font(.caption)
-                .foregroundColor(.gray)
-            Spacer()
-        }
-        .padding(.horizontal)
-        .padding(.vertical, 6)
-    }
-    
     // MARK: - Messages List
     
     private var messagesList: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                if messages.isEmpty {
-                    emptyState
-                } else {
-                    LazyVStack(spacing: 12) {
+                LazyVStack(spacing: 4) {
+                    if messages.isEmpty {
+                        emptyState
+                    } else {
                         ForEach(messages) { message in
                             MessageBubble(message: message, voiceService: voiceService)
                                 .id(message.id)
                         }
                     }
-                    .padding()
                 }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
             }
             .onChange(of: messages.count) { _ in
                 if let last = messages.last {
@@ -94,146 +89,190 @@ struct ContentView: View {
     }
     
     private var emptyState: some View {
-        VStack(spacing: 20) {
+        VStack(spacing: 16) {
             Spacer()
-            
             Image(systemName: "waveform.circle.fill")
-                .font(.system(size: 80))
-                .foregroundColor(.purple.opacity(0.6))
-            
-            Text("按住下方按钮开始聊天")
+                .font(.system(size: 72))
+                .foregroundColor(.purple.opacity(0.5))
+            Text("开始聊天")
                 .font(.title3)
+                .fontWeight(.semibold)
                 .foregroundColor(.gray)
-            
-            Text("我会用语音回复你")
+            Text("在下方输入文字或按住麦克风说话")
                 .font(.subheadline)
                 .foregroundColor(.gray.opacity(0.6))
-            
             Spacer()
         }
         .frame(maxWidth: .infinity)
+        .padding(.top, 60)
     }
     
-    // MARK: - Recording Area
+    // MARK: - Input Bar (WeChat style)
     
-    private var recordingArea: some View {
+    private var inputBar: some View {
         VStack(spacing: 0) {
-            Divider()
-                .background(Color.purple.opacity(0.3))
+            Divider().background(Color.gray.opacity(0.3))
             
-            HStack(spacing: 16) {
-                // Transcribed text preview
-                if audioService.isRecording || !audioService.transcribedText.isEmpty {
-                    Text(audioService.transcribedText.isEmpty ? "正在听..." : audioService.transcribedText)
-                        .font(.body)
-                        .foregroundColor(.white.opacity(0.8))
-                        .lineLimit(2)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(spacing: 8) {
+                // "+" button
+                Button(action: {}) {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.title2)
+                        .foregroundColor(.gray)
                 }
                 
-                Spacer()
+                if inputMode == .text {
+                    // Text input field
+                    textFieldArea
+                } else {
+                    // Voice recording button ("按住 说话")
+                    voiceButtonArea
+                }
                 
-                // Record button
-                recordButton
+                // Toggle button (switch between text/voice)
+                Button(action: {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        inputMode = inputMode == .text ? .voice : .text
+                    }
+                }) {
+                    Image(systemName: inputMode == .text ? "mic.fill" : "keyboard.fill")
+                        .font(.system(size: 16))
+                        .foregroundColor(.white)
+                        .frame(width: 32, height: 32)
+                        .background(Color.purple)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
             }
-            .padding(.horizontal)
-            .padding(.vertical, 12)
-            .background(Color.black)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .padding(.bottom, 4)
+        }
+        .background(Color(.systemGray6).opacity(0.95))
+    }
+    
+    // MARK: - Text Input Area
+    
+    private var textFieldArea: some View {
+        HStack(spacing: 6) {
+            TextField("输入消息...", text: $textInput)
+                .font(.body)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color(.systemGray5))
+                .clipShape(RoundedRectangle(cornerRadius: 20))
+            
+            if !textInput.trimmingCharacters(in: .whitespaces).isEmpty {
+                Button(action: sendTextMessage) {
+                    Image(systemName: "arrow.up.circle.fill")
+                        .font(.title2)
+                        .foregroundColor(.purple)
+                }
+                .disabled(voiceService.isProcessing)
+            }
         }
     }
     
-    private var recordButton: some View {
+    // MARK: - Voice Recording Area
+    
+    private var voiceButtonArea: some View {
         Button(action: {
             if audioService.isRecording {
                 Task { await sendRecording() }
             }
         }) {
-            ZStack {
-                Circle()
-                    .fill(audioService.isRecording ? Color.red : Color.purple)
-                    .frame(width: 56, height: 56)
-                
-                if audioService.isRecording {
-                    // Stop icon (square)
-                    RoundedRectangle(cornerRadius: 4)
-                        .fill(Color.white)
-                        .frame(width: 20, height: 20)
-                } else {
-                    // Mic icon
-                    Image(systemName: "mic.fill")
-                        .font(.title2)
-                        .foregroundColor(.white)
-                }
-            }
+            Text(audioService.isRecording ? "松开 发送" : "按住 说话")
+                .font(.body)
+                .fontWeight(.medium)
+                .foregroundColor(audioService.isRecording ? .white : .primary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+                .background(
+                    RoundedRectangle(cornerRadius: 22)
+                        .fill(audioService.isRecording ? Color.red : Color(.systemGray5))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 22)
+                        .stroke(audioService.isRecording ? Color.red.opacity(0.5) : Color.clear, lineWidth: 2)
+                )
         }
         .simultaneousGesture(
-            LongPressGesture(minimumDuration: 0.1)
+            LongPressGesture(minimumDuration: 0.15)
                 .onEnded { _ in
-                    if !audioService.isRecording {
+                    if !audioService.isRecording && !voiceService.isProcessing {
                         audioService.startRecording()
                         let impact = UIImpactFeedbackGenerator(style: .medium)
                         impact.impactOccurred()
                     }
                 }
         )
-        .scaleEffect(audioService.isRecording ? 1.1 : 1.0)
-        .animation(.spring(response: 0.3), value: audioService.isRecording)
         .disabled(voiceService.isProcessing)
     }
     
-    // MARK: - Actions
+    // MARK: - Send Actions
+    
+    private func sendTextMessage() {
+        let text = textInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        
+        textInput = ""
+        
+        let userMessage = ChatMessage(
+            id: UUID(), isUser: true, text: text,
+            audioURL: nil, timestamp: Date()
+        )
+        messages.append(userMessage)
+        
+        Task {
+            do {
+                let response = try await voiceService.sendMessage(text: text, conversationId: conversationId)
+                await MainActor.run { conversationId = response.conversationId }
+                
+                let aiMessage = ChatMessage(
+                    id: UUID(), isUser: false,
+                    text: response.replyText,
+                    audioURL: response.audioUrl,
+                    timestamp: Date(),
+                    duration: TimeInterval(response.durationMs) / 1000.0
+                )
+                await MainActor.run { messages.append(aiMessage) }
+                
+                if let audioURL = voiceService.audioURL(for: response.audioUrl) {
+                    try? await voiceService.playAudio(from: audioURL)
+                }
+            } catch {
+                await MainActor.run { showConnectionError = true }
+            }
+        }
+    }
     
     private func sendRecording() async {
         let text = await audioService.stopRecording()
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return
-        }
-        
-        // Add user message
         let userMessage = ChatMessage(
-            id: UUID(),
-            isUser: true,
-            text: text,
-            audioURL: nil,
-            timestamp: Date()
+            id: UUID(), isUser: true, text: text,
+            audioURL: nil, timestamp: Date()
         )
-        await MainActor.run {
-            messages.append(userMessage)
-        }
+        await MainActor.run { messages.append(userMessage) }
         
-        // Send to backend
         do {
-            let response = try await voiceService.sendMessage(
-                text: text,
-                conversationId: conversationId
-            )
+            let response = try await voiceService.sendMessage(text: text, conversationId: conversationId)
+            await MainActor.run { conversationId = response.conversationId }
             
-            await MainActor.run {
-                conversationId = response.conversationId
-            }
-            
-            // Add AI message
             let aiMessage = ChatMessage(
-                id: UUID(),
-                isUser: false,
+                id: UUID(), isUser: false,
                 text: response.replyText,
                 audioURL: response.audioUrl,
                 timestamp: Date(),
                 duration: TimeInterval(response.durationMs) / 1000.0
             )
-            await MainActor.run {
-                messages.append(aiMessage)
-            }
+            await MainActor.run { messages.append(aiMessage) }
             
-            // Auto-play the AI's voice reply
             if let audioURL = voiceService.audioURL(for: response.audioUrl) {
                 try? await voiceService.playAudio(from: audioURL)
             }
         } catch {
-            await MainActor.run {
-                showConnectionError = true
-            }
+            await MainActor.run { showConnectionError = true }
         }
     }
     
@@ -241,9 +280,7 @@ struct ContentView: View {
         Task {
             let healthy = await voiceService.checkHealth()
             if !healthy && !messages.isEmpty {
-                await MainActor.run {
-                    showConnectionError = true
-                }
+                await MainActor.run { showConnectionError = true }
             }
         }
     }
@@ -257,64 +294,49 @@ struct MessageBubble: View {
     let voiceService: VoiceMateService
     
     var body: some View {
-        HStack {
-            if message.isUser { Spacer() }
+        HStack(alignment: .bottom, spacing: 6) {
+            if message.isUser { Spacer(minLength: 60) }
             
             VStack(alignment: message.isUser ? .trailing : .leading, spacing: 4) {
-                // Voice indicator / Text display
-                HStack(spacing: 8) {
-                    if !message.isUser {
-                        // AI message - play button
-                        Button(action: { playAudio() }) {
-                            Image(systemName: isPlaying ? "stop.circle.fill" : "play.circle.fill")
-                                .font(.title2)
-                                .foregroundColor(.purple)
-                        }
-                        
-                        // Waveform animation when playing
-                        if isPlaying {
-                            HStack(spacing: 3) {
-                                ForEach(0..<4) { i in
-                                    RoundedRectangle(cornerRadius: 2)
-                                        .fill(Color.purple)
-                                        .frame(width: 3, height: 12 + CGFloat.random(in: 4...16))
-                                        .animation(
-                                            .easeInOut(duration: 0.5).repeatForever().delay(Double(i) * 0.1),
-                                            value: isPlaying
-                                        )
-                                }
-                            }
-                        }
-                    }
-                    
-                    // Text
-                    Text(message.text)
-                        .font(.body)
-                        .foregroundColor(message.isUser ? .white : .white.opacity(0.9))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(
-                            RoundedRectangle(cornerRadius: 16)
-                                .fill(message.isUser ? Color.purple : Color.gray.opacity(0.2))
-                        )
-                }
+                // Bubble
+                Text(message.text)
+                    .font(.body)
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 18)
+                            .fill(message.isUser ? Color.purple : Color(.systemGray3))
+                    )
                 
-                // Timestamp
-                Text(message.timestamp, style: .time)
-                    .font(.caption2)
-                    .foregroundColor(.gray.opacity(0.5))
+                // AI audio play button
+                if !message.isUser, let audioPath = message.audioURL {
+                    Button(action: { playAudio(audioPath) }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: isPlaying ? "stop.fill" : "play.fill")
+                                .font(.caption)
+                            Text(isPlaying ? "停止" : "语音 \(Int(message.duration))″")
+                                .font(.caption)
+                        }
+                        .foregroundColor(.purple)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Color.purple.opacity(0.1))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                    }
+                }
             }
             
-            if !message.isUser { Spacer() }
+            if !message.isUser { Spacer(minLength: 60) }
         }
+        .padding(.vertical, 2)
     }
     
-    private func playAudio() {
-        isPlaying.toggle()
-        if isPlaying, let audioPath = message.audioURL, let url = voiceService.audioURL(for: audioPath) {
+    private func playAudio(_ path: String) {
+        isPlaying = true
+        if let url = voiceService.audioURL(for: path) {
             Task {
                 try? await voiceService.playAudio(from: url)
-                // Reset after playing
                 try? await Task.sleep(nanoseconds: UInt64(message.duration * 1_000_000_000))
                 await MainActor.run { isPlaying = false }
             }
@@ -327,6 +349,15 @@ struct MessageBubble: View {
 struct SettingsView: View {
     @ObservedObject var service: VoiceMateService
     @Environment(\.dismiss) var dismiss
+    @AppStorage("selected_voice") private var selectedVoice = "zh-CN-XiaoxiaoNeural"
+    
+    let voices = [
+        ("zh-CN-XiaoxiaoNeural", "小晓 (女声)"),
+        ("zh-CN-XiaoyiNeural", "小伊 (女声活泼)"),
+        ("zh-CN-YunxiNeural", "云希 (男声)"),
+        ("zh-CN-YunjianNeural", "云健 (男声成熟)"),
+        ("zh-CN-XiaochenNeural", "小辰 (男声文艺)"),
+    ]
     
     var body: some View {
         NavigationStack {
@@ -337,8 +368,8 @@ struct SettingsView: View {
                         TextField("服务器 IP", text: $service.serverHost)
                             .keyboardType(.decimalPad)
                             .multilineTextAlignment(.trailing)
+                            .autocorrectionDisabled()
                     }
-                    
                     HStack {
                         Text("端口")
                         TextField("端口号", text: $service.serverPort)
@@ -347,14 +378,23 @@ struct SettingsView: View {
                     }
                 }
                 
+                Section("语音设置") {
+                    Picker("AI 声音", selection: $selectedVoice) {
+                        ForEach(voices, id: \.0) { voice in
+                            Text(voice.1).tag(voice.0)
+                        }
+                    }
+                    Text("选择 AI 回复时使用的语音")
+                        .font(.caption)
+                        .foregroundColor(.gray)
+                }
+                
                 Section {
                     Button("测试连接") {
                         Task {
                             let ok = await service.checkHealth()
                             await MainActor.run {
-                                if ok {
-                                    dismiss()
-                                }
+                                if ok { dismiss() }
                             }
                         }
                     }
@@ -364,8 +404,7 @@ struct SettingsView: View {
                     HStack {
                         Text("版本")
                         Spacer()
-                        Text("1.0.0")
-                            .foregroundColor(.gray)
+                        Text("1.0.0").foregroundColor(.gray)
                     }
                 }
             }
@@ -377,5 +416,12 @@ struct SettingsView: View {
                 }
             }
         }
+        .onChange(of: selectedVoice) { newVoice in
+            service.selectedVoice = newVoice
+        }
     }
+}
+
+#Preview {
+    ContentView()
 }

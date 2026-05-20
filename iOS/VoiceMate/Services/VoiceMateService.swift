@@ -10,6 +10,9 @@ class VoiceMateService: ObservableObject {
     @Published var serverPort: String {
         didSet { UserDefaults.standard.set(serverPort, forKey: "server_port") }
     }
+    @Published var selectedVoice: String {
+        didSet { UserDefaults.standard.set(selectedVoice, forKey: "selected_voice") }
+    }
     
     private var baseURL: String {
         "http://\(serverHost):\(serverPort)"
@@ -23,9 +26,10 @@ class VoiceMateService: ObservableObject {
     private let session: URLSession
     
     init() {
-        // Load saved config or use defaults
-        self.serverHost = UserDefaults.standard.string(forKey: "server_host") ?? "192.168.1.100"
+        // Load saved config or use defaults (persists across reboots)
+        self.serverHost = UserDefaults.standard.string(forKey: "server_host") ?? "192.168.10.227"
         self.serverPort = UserDefaults.standard.string(forKey: "server_port") ?? "8000"
+        self.selectedVoice = UserDefaults.standard.string(forKey: "selected_voice") ?? "zh-CN-XiaoxiaoNeural"
         
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 30
@@ -45,7 +49,11 @@ class VoiceMateService: ObservableObject {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         
-        let body = ChatRequest(text: text, conversationId: conversationId)
+        let body = ChatRequest(
+            text: text,
+            conversationId: conversationId,
+            voice: selectedVoice
+        )
         request.httpBody = try JSONEncoder().encode(body)
         
         let (data, response) = try await session.data(for: request)
@@ -72,7 +80,6 @@ class VoiceMateService: ObservableObject {
     func playAudio(from url: URL) async throws {
         let (data, _) = try await session.data(from: url)
         
-        // Create a temp file and play it
         let tempURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
             .appendingPathExtension("mp3")

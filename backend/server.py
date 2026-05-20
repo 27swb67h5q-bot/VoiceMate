@@ -80,7 +80,8 @@ app.add_middleware(
 
 class ChatRequest(BaseModel):
     text: str
-    conversation_id: Optional[str] = None  # For future multi-turn context
+    conversation_id: Optional[str] = None
+    voice: Optional[str] = None  # Override TTS voice
 
 
 class ChatResponse(BaseModel):
@@ -200,7 +201,9 @@ async def chat(request: ChatRequest):
     # 1. Get AI reply
     reply = await deepseek.chat(request.text, conv_id)
 
-    # 2. Generate TTS audio
+    # 2. Generate TTS audio (use requested voice if provided)
+    if request.voice:
+        tts.voice = request.voice
     audio_path, duration_ms = await tts.synthesize(reply)
 
     # 3. Store conversation context (for future multi-turn support)
