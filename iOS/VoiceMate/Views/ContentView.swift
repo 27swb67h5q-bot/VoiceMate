@@ -160,6 +160,8 @@ struct ContentView: View {
                 .padding(.vertical, 8)
                 .background(Color(.systemGray5))
                 .clipShape(RoundedRectangle(cornerRadius: 20))
+                .submitLabel(.send)
+                .onSubmit(sendTextMessage)
             
             if !textInput.trimmingCharacters(in: .whitespaces).isEmpty {
                 Button(action: sendTextMessage) {
