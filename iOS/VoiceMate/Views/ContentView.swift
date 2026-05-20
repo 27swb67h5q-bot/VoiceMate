@@ -25,7 +25,7 @@ struct ContentView: View {
                 inputBar
             }
             .background(Color(.systemGroupedBackground))
-            .navigationTitle("VoiceMate")
+            .navigationTitle("妤妤")
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.visible, for: .navigationBar)
             .toolbar {
@@ -385,6 +385,14 @@ struct SettingsView: View {
                         }
                     }
                     Text("选择 AI 回复时使用的语音")
+                        .font(.caption)
+                        .foregroundColor(.gray)
+                }
+                
+                Section("声音克隆") {
+                    NavigationLink("录制声音样本", destination: VoiceCloneView())
+                        .foregroundColor(.purple)
+                    Text("录制几段你的声音，AI 就能用你的声音回复")
                         .font(.caption)
                         .foregroundColor(.gray)
                 }
