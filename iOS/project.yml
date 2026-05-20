@@ -8,10 +8,9 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.9"
-    TARGETED_DEVICE_FAMILY: "1"  # iPhone only
+    TARGETED_DEVICE_FAMILY: "1"
     ARCHS: arm64
-    INFOPLIST_FILE: "VoiceMate/Resources/Info.plist"
-    DEVELOPMENT_TEAM: ""  # Leave empty for TrollStore (unsigned)
+    DEVELOPMENT_TEAM: ""
 
 targets:
   VoiceMate:
@@ -19,8 +18,6 @@ targets:
     platform: iOS
     sources:
       - path: VoiceMate
-    info:
-      path: VoiceMate/Resources/Info.plist
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.voicemate.app
@@ -30,4 +27,3 @@ targets:
         CODE_SIGN_IDENTITY: ""
         CODE_SIGNING_REQUIRED: NO
         CODE_SIGNING_ALLOWED: NO
-        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
