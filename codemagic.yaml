@@ -15,7 +15,8 @@ workflows:
           # Install xcodegen if not present
           which xcodegen >/dev/null 2>&1 || brew install xcodegen
           
-          # Generate Xcode project from project.yml
+          # Clean stale xcodeproj, then regenerate
+          rm -rf VoiceMate.xcodeproj
           xcodegen generate
           
           # Build for iOS device (unsigned)

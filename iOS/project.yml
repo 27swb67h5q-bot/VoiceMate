@@ -1,4 +1,4 @@
-name: 妤妤
+name: VoiceMate
 options:
   bundleIdPrefix: com.voicemate
   deploymentTarget:
