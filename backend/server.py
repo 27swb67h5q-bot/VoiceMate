@@ -26,7 +26,7 @@ from typing import Optional
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -135,13 +135,7 @@ class DeepSeekClient:
 
     async def chat(self, text: str, conversation_id: Optional[str] = None, history: list = None) -> str:
         """Send a message to DeepSeek and get reply text."""
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-        ]
-        if history:
-            messages.extend(history)
-        messages.append({"role": "user", "content": text})
-
+        messages = self._build_messages(text, history)
         start = time.time()
         try:
             response = await self.client.chat.completions.create(
@@ -156,8 +150,33 @@ class DeepSeekClient:
             return reply
         except Exception as e:
             logger.error(f"DeepSeek API error: {e}")
-            # Fallback response
             return "嗯，我听到你了。不过我现在有点卡顿，能再说一遍吗？"
+
+    def _build_messages(self, text: str, history: list = None) -> list:
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": text})
+        return messages
+
+    async def stream_chat(self, text: str, history: list = None):
+        """Stream DeepSeek response tokens one by one."""
+        messages = self._build_messages(text, history)
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                max_tokens=200,
+                temperature=0.8,
+                stream=True,
+            )
+            async for chunk in response:
+                delta = chunk.choices[0].delta
+                if delta and delta.content:
+                    yield delta.content
+        except Exception as e:
+            logger.error(f"DeepSeek stream error: {e}")
+            yield "嗯，我听到你了。"
 
 
 # ── TTS Engine (edge-tts) ───────────────────────────────────────────────────
@@ -388,7 +407,65 @@ async def voice_chat(
     }
 
 
-# ── WebSocket for Real-Time Voice (Future) ──────────────────────────────────
+# ── WebSocket for Streaming Chat ────────────────────────────────────────────
+
+@app.websocket("/v1/ws/chat")
+async def ws_chat(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        data = await websocket.receive_json()
+        text = data.get("text", "").strip()
+        conv_id = data.get("conversation_id") or str(uuid.uuid4())
+        voice_name = data.get("voice")
+
+        if not text:
+            await websocket.send_json({"type": "error", "message": "Text cannot be empty"})
+            await websocket.close()
+            return
+
+        logger.info(f"WS chat [{conv_id}]: {text[:60]}")
+
+        # Load history
+        conv_history = history.load(conv_id)
+
+        # Stream DeepSeek tokens
+        full_reply = ""
+        async for token in deepseek.stream_chat(text, conv_history):
+            full_reply += token
+            await websocket.send_json({"type": "token", "content": token})
+
+        # Save history
+        history.append(conv_id, text, full_reply)
+
+        # Generate TTS
+        if voice_name:
+            tts.voice = voice_name
+        audio_path, duration_ms = await tts.synthesize(full_reply)
+        audio_url = f"/v1/audio/{os.path.basename(audio_path)}"
+
+        await websocket.send_json({
+            "type": "done",
+            "audio_url": audio_url,
+            "conversation_id": conv_id,
+            "duration_ms": duration_ms,
+            "full_text": full_reply,
+        })
+    except WebSocketDisconnect:
+        logger.info("WS client disconnected")
+    except Exception as e:
+        logger.error(f"WS error: {e}")
+        try:
+            await websocket.send_json({"type": "error", "message": str(e)})
+        except:
+            pass
+    finally:
+        try:
+            await websocket.close()
+        except:
+            pass
+
+
+# ── Placeholder for Phase 2: real-time voice conversation
 
 # Placeholder for Phase 2: real-time voice conversation
 # @app.websocket("/v1/ws/voice")
