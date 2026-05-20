@@ -15,7 +15,6 @@ struct ContentView: View {
     @State private var inputMode: InputMode = .voice
     @State private var textInput: String = ""
     @State private var showPlusMenu = false
-    @State private var streamingMessageId: UUID? = nil
     
     enum InputMode {
         case text, voice
@@ -81,14 +80,8 @@ struct ContentView: View {
                         emptyState
                     } else {
                         ForEach(messages) { message in
-                            Group {
-                                if message.id == streamingMessageId {
-                                    MessageBubble(message: message, voiceService: voiceService, streamingText: voiceService.streamingText)
-                                } else {
-                                    MessageBubble(message: message, voiceService: voiceService, streamingText: nil)
-                                }
-                            }
-                            .id(message.id)
+                            MessageBubble(message: message, voiceService: voiceService)
+                                .id(message.id)
                         }
                     }
                 }
@@ -139,9 +132,7 @@ struct ContentView: View {
                         .foregroundColor(.gray)
                 }
                 .confirmationDialog("更多功能", isPresented: $showPlusMenu) {
-                    Button("实时通话", systemImage: "phone.fill") {
-                        startVoiceCall()
-                    }
+                    Button("实时通话", systemImage: "phone.fill") { }
                     Button("取消", role: .cancel) {}
                 } message: {
                     Text("选择功能")
@@ -259,13 +250,6 @@ struct ContentView: View {
         }
     }
     
-    // MARK: - Voice Call (placeholder)
-    
-    private func startVoiceCall() {
-        // TODO: Implement real-time voice call via WebSocket
-        // For now, show coming soon message
-    }
-    
     // MARK: - Chat History Persistence
     
     private func saveMessages() {
@@ -288,35 +272,38 @@ struct ContentView: View {
     private func sendTextMessage() {
         let text = textInput.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
+        
         textInput = ""
         
-        let userMessage = ChatMessage(id: UUID(), isUser: true, text: text, audioURL: nil, timestamp: Date())
+        let userMessage = ChatMessage(
+            id: UUID(), isUser: true, text: text,
+            audioURL: nil, timestamp: Date()
+        )
         messages.append(userMessage)
         saveMessages()
         
-        // Create streaming placeholder
-        let aiId = UUID()
-        streamingMessageId = aiId
-        messages.append(ChatMessage(id: aiId, isUser: false, text: "", audioURL: nil, timestamp: Date()))
-        
         Task {
             do {
-                let response = try await voiceService.sendMessageStream(text: text, conversationId: conversationId)
+                let response = try await voiceService.sendMessage(text: text, conversationId: conversationId)
+                await MainActor.run { conversationId = response.conversationId }
+                
+                let aiMessage = ChatMessage(
+                    id: UUID(), isUser: false,
+                    text: response.replyText,
+                    audioURL: response.audioUrl,
+                    timestamp: Date(),
+                    duration: TimeInterval(response.durationMs) / 1000.0
+                )
                 await MainActor.run {
-                    conversationId = response.conversationId
-                    streamingMessageId = nil
-                    if let idx = messages.firstIndex(where: { $0.id == aiId }) {
-                        messages[idx].text = response.replyText
-                        messages[idx].audioURL = response.audioUrl
-                        messages[idx].duration = TimeInterval(response.durationMs) / 1000.0
-                    }
+                    messages.append(aiMessage)
                     saveMessages()
                 }
-                if let url = voiceService.audioURL(for: response.audioUrl) {
-                    try? await voiceService.playAudio(from: url)
+                
+                if let audioURL = voiceService.audioURL(for: response.audioUrl) {
+                    try? await voiceService.playAudio(from: audioURL)
                 }
             } catch {
-                await MainActor.run { streamingMessageId = nil }
+                await MainActor.run { showConnectionError = true }
             }
         }
     }
@@ -325,31 +312,33 @@ struct ContentView: View {
         let text = await audioService.stopRecording()
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         
-        let userMessage = ChatMessage(id: UUID(), isUser: true, text: text, audioURL: nil, timestamp: Date())
+        let userMessage = ChatMessage(
+            id: UUID(), isUser: true, text: text,
+            audioURL: nil, timestamp: Date()
+        )
         await MainActor.run { messages.append(userMessage); saveMessages() }
         
-        // Create streaming placeholder
-        let aiId = UUID()
-        await MainActor.run { streamingMessageId = aiId }
-        await MainActor.run { messages.append(ChatMessage(id: aiId, isUser: false, text: "", audioURL: nil, timestamp: Date())) }
-        
         do {
-            let response = try await voiceService.sendMessageStream(text: text, conversationId: conversationId)
+            let response = try await voiceService.sendMessage(text: text, conversationId: conversationId)
+            await MainActor.run { conversationId = response.conversationId }
+            
+            let aiMessage = ChatMessage(
+                id: UUID(), isUser: false,
+                text: response.replyText,
+                audioURL: response.audioUrl,
+                timestamp: Date(),
+                duration: TimeInterval(response.durationMs) / 1000.0
+            )
             await MainActor.run {
-                conversationId = response.conversationId
-                streamingMessageId = nil
-                if let idx = messages.firstIndex(where: { $0.id == aiId }) {
-                    messages[idx].text = response.replyText
-                    messages[idx].audioURL = response.audioUrl
-                    messages[idx].duration = TimeInterval(response.durationMs) / 1000.0
-                }
+                messages.append(aiMessage)
                 saveMessages()
             }
-            if let url = voiceService.audioURL(for: response.audioUrl) {
-                try? await voiceService.playAudio(from: url)
+            
+            if let audioURL = voiceService.audioURL(for: response.audioUrl) {
+                try? await voiceService.playAudio(from: audioURL)
             }
         } catch {
-            await MainActor.run { streamingMessageId = nil }
+            await MainActor.run { showConnectionError = true }
         }
     }
     
@@ -369,16 +358,14 @@ struct MessageBubble: View {
     let message: ChatMessage
     @State private var isPlaying = false
     let voiceService: VoiceMateService
-    let streamingText: String?
     
     var body: some View {
         HStack(alignment: .bottom, spacing: 6) {
             if message.isUser { Spacer(minLength: 60) }
             
             VStack(alignment: message.isUser ? .trailing : .leading, spacing: 4) {
-                // Bubble - show streaming text or final text
-                let displayText = streamingText ?? message.text
-                Text(displayText.isEmpty ? "..." : displayText)
+                // Bubble
+                Text(message.text)
                     .font(.body)
                     .foregroundColor(.white)
                     .padding(.horizontal, 14)
@@ -388,8 +375,8 @@ struct MessageBubble: View {
                             .fill(message.isUser ? Color.purple : Color(.systemGray3))
                     )
                 
-                // AI audio play button (hidden during streaming)
-                if !message.isUser, let audioPath = message.audioURL, streamingText == nil {
+                // AI audio play button
+                if !message.isUser, let audioPath = message.audioURL {
                     Button(action: { playAudio(audioPath) }) {
                         HStack(spacing: 6) {
                             Image(systemName: isPlaying ? "stop.fill" : "play.fill")
