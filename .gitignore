@@ -1,6 +1,4 @@
-*.pyc
+backend/venv/
 __pycache__/
+*.pyc
 .env
-.DS_Store
-*.ipa
-build/
