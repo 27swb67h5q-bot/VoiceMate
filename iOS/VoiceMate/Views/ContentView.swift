@@ -4,11 +4,15 @@ struct ContentView: View {
     @StateObject private var voiceService = VoiceMateService()
     @StateObject private var audioService = AudioService()
     
+    @AppStorage("selected_voice") private var selectedVoice = "zh-CN-XiaoxiaoNeural"
+    private let messagesKey = "chat_messages"
+    private let convIdKey = "conversation_id"
+    
     @State private var messages: [ChatMessage] = []
     @State private var conversationId: String?
     @State private var showSettings = false
     @State private var showConnectionError = false
-    @State private var inputMode: InputMode = .voice  // .text or .voice
+    @State private var inputMode: InputMode = .voice
     @State private var textInput: String = ""
     
     enum InputMode {
@@ -54,10 +58,13 @@ struct ContentView: View {
                 Text("无法连接到 VoiceMate 服务器，请检查网络和服务器地址。")
             }
             .onAppear {
+                loadMessages()
                 checkConnection()
             }
         }
         .preferredColorScheme(.dark)
+        // Recording overlay (WeChat style)
+        .overlay(recordingOverlay)
     }
     
     // MARK: - Messages List
@@ -210,6 +217,46 @@ struct ContentView: View {
         .disabled(voiceService.isProcessing)
     }
     
+    // MARK: - Recording Overlay (WeChat style)
+    
+    @ViewBuilder
+    private var recordingOverlay: some View {
+        if audioService.isRecording {
+            Color.black.opacity(0.5)
+                .ignoresSafeArea()
+                .overlay(
+                    VStack(spacing: 20) {
+                        Image(systemName: "mic.fill")
+                            .font(.system(size: 80))
+                            .foregroundColor(.white)
+                        
+                        Text("松开 发送")
+                            .font(.headline)
+                            .foregroundColor(.white)
+                    }
+                )
+                .transition(.opacity)
+                .animation(.easeInOut(duration: 0.2), value: audioService.isRecording)
+        }
+    }
+    
+    // MARK: - Chat History Persistence
+    
+    private func saveMessages() {
+        if let encoded = try? JSONEncoder().encode(messages) {
+            UserDefaults.standard.set(encoded, forKey: messagesKey)
+        }
+        UserDefaults.standard.set(conversationId, forKey: convIdKey)
+    }
+    
+    private func loadMessages() {
+        if let data = UserDefaults.standard.data(forKey: messagesKey),
+           let decoded = try? JSONDecoder().decode([ChatMessage].self, from: data) {
+            messages = decoded
+        }
+        conversationId = UserDefaults.standard.string(forKey: convIdKey)
+    }
+    
     // MARK: - Send Actions
     
     private func sendTextMessage() {
@@ -223,6 +270,7 @@ struct ContentView: View {
             audioURL: nil, timestamp: Date()
         )
         messages.append(userMessage)
+        saveMessages()
         
         Task {
             do {
@@ -236,7 +284,10 @@ struct ContentView: View {
                     timestamp: Date(),
                     duration: TimeInterval(response.durationMs) / 1000.0
                 )
-                await MainActor.run { messages.append(aiMessage) }
+                await MainActor.run {
+                    messages.append(aiMessage)
+                    saveMessages()
+                }
                 
                 if let audioURL = voiceService.audioURL(for: response.audioUrl) {
                     try? await voiceService.playAudio(from: audioURL)
@@ -255,7 +306,7 @@ struct ContentView: View {
             id: UUID(), isUser: true, text: text,
             audioURL: nil, timestamp: Date()
         )
-        await MainActor.run { messages.append(userMessage) }
+        await MainActor.run { messages.append(userMessage); saveMessages() }
         
         do {
             let response = try await voiceService.sendMessage(text: text, conversationId: conversationId)
@@ -268,7 +319,10 @@ struct ContentView: View {
                 timestamp: Date(),
                 duration: TimeInterval(response.durationMs) / 1000.0
             )
-            await MainActor.run { messages.append(aiMessage) }
+            await MainActor.run {
+                messages.append(aiMessage)
+                saveMessages()
+            }
             
             if let audioURL = voiceService.audioURL(for: response.audioUrl) {
                 try? await voiceService.playAudio(from: audioURL)
@@ -354,11 +408,13 @@ struct SettingsView: View {
     @AppStorage("selected_voice") private var selectedVoice = "zh-CN-XiaoxiaoNeural"
     
     let voices = [
-        ("zh-CN-XiaoxiaoNeural", "小晓 (女声)"),
-        ("zh-CN-XiaoyiNeural", "小伊 (女声活泼)"),
-        ("zh-CN-YunxiNeural", "云希 (男声)"),
-        ("zh-CN-YunjianNeural", "云健 (男声成熟)"),
-        ("zh-CN-XiaochenNeural", "小辰 (男声文艺)"),
+        ("zh-CN-XiaoxiaoNeural", "小晓 (温柔女声)"),
+        ("zh-CN-XiaoyiNeural", "小伊 (活泼女声)"),
+        ("zh-CN-XiaomengNeural", "小梦 (甜美女声)"),
+        ("zh-CN-XiaohanNeural", "小涵 (知性女声)"),
+        ("zh-CN-XiaomoNeural", "小莫 (御姐女声)"),
+        ("zh-CN-XiaoxuanNeural", "小萱 (软萌女声)"),
+        ("zh-CN-XiaotongNeural", "小桐 (元气女声)"),
     ]
     
     var body: some View {

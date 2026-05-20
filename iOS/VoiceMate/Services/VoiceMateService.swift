@@ -87,6 +87,10 @@ class VoiceMateService: ObservableObject {
         try data.write(to: tempURL)
         
         await MainActor.run {
+            // Route audio to speaker (not earpiece)
+            try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+            try? AVAudioSession.sharedInstance().setActive(true)
+            
             self.audioPlayer = try? AVAudioPlayer(contentsOf: tempURL)
             self.audioPlayer?.prepareToPlay()
             self.audioPlayer?.play()
