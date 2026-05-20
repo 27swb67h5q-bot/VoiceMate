@@ -486,6 +486,19 @@ struct SettingsView: View {
                         .foregroundColor(.gray)
                 }
                 
+                Section("人设") {
+                    Picker("性格", selection: $service.selectedPersona) {
+                        Text("🧡 恋爱脑").tag("love")
+                        Text("💛 温暖陪聊").tag("warm")
+                        Text("💜 知心姐姐").tag("sister")
+                        Text("🔥 毒舌傲娇").tag("tsundere")
+                        Text("🌸 元气少女").tag("genki")
+                    }
+                    Text("切换后新对话会使用新人设")
+                        .font(.caption)
+                        .foregroundColor(.gray)
+                }
+                
                 Section("声音克隆") {
                     NavigationLink("录制声音样本", destination: VoiceCloneView())
                         .foregroundColor(.purple)

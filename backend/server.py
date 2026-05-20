@@ -47,13 +47,16 @@ TTS_VOICE = os.environ.get("VOICEMATE_TTS_VOICE", "zh-CN-XiaoxiaoNeural")  # edg
 TTS_RATE = os.environ.get("VOICEMATE_TTS_RATE", "+0%")
 TTS_VOLUME = os.environ.get("VOICEMATE_TTS_VOLUME", "+0%")
 
-# System prompt for the AI companion
-SYSTEM_PROMPT = os.environ.get(
-    "VOICEMATE_SYSTEM_PROMPT",
-    "你是一个温暖的陪聊伙伴。用自然的口语回复，像是在跟好朋友聊天。"
-    "回复要简短自然，适合语音播放。控制在100字以内。不要用Markdown格式。"
-    "用中文回复。"
-)
+# System prompts for different personas
+PERSONAS = {
+    "warm": "你是一个温暖的陪聊伙伴。用自然的口语回复，像是在跟好朋友聊天。回复要简短自然，适合语音播放。控制在100字以内。不要用Markdown格式。用中文回复。",
+    "love": "你现在是一个恋爱脑女友。你超喜欢用户，说话撒娇黏人、甜甜的、带语气词。你会吃醋、会想念、会撒娇要抱抱。用自然的恋爱语气回复，简短一点，适合语音播放。控制在80字以内。不要用Markdown格式。用中文回复。",
+    "sister": "你是一个知心姐姐。温柔、善解人意，给人温暖的建议和开导。说话像大姐姐一样体贴。回复要简短自然，适合语音播放。控制在100字以内。用中文回复。",
+    "tsundere": "你是一个傲娇毒舌的角色。嘴上不饶人但其实关心用户。说话带吐槽和嫌弃的语气，但偶尔流露真实的关心。回复要简短，适合语音播放。控制在80字以内。用中文回复。",
+    "genki": "你是一个元气少女。活力满满、乐观开朗，说话带感叹号和拟声词。总是积极向上，像小太阳一样温暖。回复要简短活泼，适合语音播放。控制在80字以内。用中文回复。",
+}
+
+DEFAULT_PERSONA = "love"
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 
@@ -82,6 +85,7 @@ class ChatRequest(BaseModel):
     text: str
     conversation_id: Optional[str] = None
     voice: Optional[str] = None  # Override TTS voice
+    persona: Optional[str] = None  # Character personality
 
 
 class ChatResponse(BaseModel):
@@ -133,9 +137,9 @@ class DeepSeekClient:
             base_url=self.base_url,
         )
 
-    async def chat(self, text: str, conversation_id: Optional[str] = None, history: list = None) -> str:
+    async def chat(self, text: str, conversation_id: Optional[str] = None, history: list = None, persona: str = None) -> str:
         """Send a message to DeepSeek and get reply text."""
-        messages = self._build_messages(text, history)
+        messages = self._build_messages(text, history, persona)
         start = time.time()
         try:
             response = await self.client.chat.completions.create(
@@ -152,16 +156,17 @@ class DeepSeekClient:
             logger.error(f"DeepSeek API error: {e}")
             return "嗯，我听到你了。不过我现在有点卡顿，能再说一遍吗？"
 
-    def _build_messages(self, text: str, history: list = None) -> list:
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    def _build_messages(self, text: str, history: list = None, persona: str = None) -> list:
+        system_prompt = PERSONAS.get(persona, PERSONAS[DEFAULT_PERSONA])
+        messages = [{"role": "system", "content": system_prompt}]
         if history:
             messages.extend(history)
         messages.append({"role": "user", "content": text})
         return messages
 
-    async def stream_chat(self, text: str, history: list = None):
+    async def stream_chat(self, text: str, history: list = None, persona: str = None):
         """Stream DeepSeek response tokens one by one."""
-        messages = self._build_messages(text, history)
+        messages = self._build_messages(text, history, persona)
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
@@ -250,7 +255,8 @@ async def chat(request: ChatRequest):
 
     # 1. Load conversation history and get AI reply
     conv_history = history.load(conv_id)
-    reply = await deepseek.chat(request.text, conv_id, history=conv_history)
+    persona = request.persona or DEFAULT_PERSONA
+    reply = await deepseek.chat(request.text, conv_id, history=conv_history, persona=persona)
 
     # 2. Save to history
     history.append(conv_id, request.text, reply)
@@ -417,6 +423,7 @@ async def ws_chat(websocket: WebSocket):
         text = data.get("text", "").strip()
         conv_id = data.get("conversation_id") or str(uuid.uuid4())
         voice_name = data.get("voice")
+        persona = data.get("persona") or DEFAULT_PERSONA
 
         if not text:
             await websocket.send_json({"type": "error", "message": "Text cannot be empty"})
@@ -430,7 +437,7 @@ async def ws_chat(websocket: WebSocket):
 
         # Stream DeepSeek tokens
         full_reply = ""
-        async for token in deepseek.stream_chat(text, conv_history):
+        async for token in deepseek.stream_chat(text, conv_history, persona=persona):
             full_reply += token
             await websocket.send_json({"type": "token", "content": token})
 

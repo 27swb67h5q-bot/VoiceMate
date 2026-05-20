@@ -13,6 +13,9 @@ class VoiceMateService: ObservableObject {
     @Published var selectedVoice: String {
         didSet { UserDefaults.standard.set(selectedVoice, forKey: "selected_voice") }
     }
+    @Published var selectedPersona: String = "love" {
+        didSet { UserDefaults.standard.set(selectedPersona, forKey: "selected_persona") }
+    }
     
     private var baseURL: String {
         "http://\(serverHost):\(serverPort)"
@@ -32,6 +35,7 @@ class VoiceMateService: ObservableObject {
         self.serverHost = UserDefaults.standard.string(forKey: "server_host") ?? "192.168.10.227"
         self.serverPort = UserDefaults.standard.string(forKey: "server_port") ?? "8000"
         self.selectedVoice = UserDefaults.standard.string(forKey: "selected_voice") ?? "zh-CN-XiaoxiaoNeural"
+        self.selectedPersona = UserDefaults.standard.string(forKey: "selected_persona") ?? "love"
         
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 30
@@ -54,7 +58,8 @@ class VoiceMateService: ObservableObject {
         let body = ChatRequest(
             text: text,
             conversationId: conversationId,
-            voice: selectedVoice
+            voice: selectedVoice,
+            persona: selectedPersona
         )
         request.httpBody = try JSONEncoder().encode(body)
         
@@ -112,7 +117,7 @@ class VoiceMateService: ObservableObject {
         self.wsTask = task
         task.resume()
         
-        var req: [String: Any] = ["text": text, "voice": selectedVoice]
+        var req: [String: Any] = ["text": text, "voice": selectedVoice, "persona": selectedPersona]
         if let cid = conversationId { req["conversation_id"] = cid }
         let reqData = try JSONSerialization.data(withJSONObject: req)
         try await task.send(URLSessionWebSocketTask.Message.data(reqData))
