@@ -24,6 +24,10 @@ class VoiceMateService: ObservableObject {
     
     private var audioPlayer: AVAudioPlayer?
     private let session: URLSession
+    @Published var streamingText: String = ""
+    
+    // WebSocket streaming task
+    private var wsTask: URLSessionWebSocketTask?
     
     init() {
         // Load saved config or use defaults (persists across reboots)
@@ -94,6 +98,84 @@ class VoiceMateService: ObservableObject {
             self.audioPlayer = try? AVAudioPlayer(contentsOf: tempURL)
             self.audioPlayer?.prepareToPlay()
             self.audioPlayer?.play()
+        }
+    }
+    
+    /// Send message via WebSocket streaming (token by token)
+    func sendMessageStream(text: String, conversationId: String?) async throws -> ChatResponse {
+        await MainActor.run {
+            isProcessing = true
+            streamingText = ""
+        }
+        defer { Task { @MainActor in isProcessing = false } }
+        
+        let wsURL = URL(string: "ws://\(serverHost):\(serverPort)/v1/ws/chat")!
+        let task = session.webSocketTask(with: wsURL)
+        self.wsTask = task
+        task.resume()
+        
+        // Send request as JSON data
+        var req: [String: Any] = ["text": text, "voice": selectedVoice]
+        if let cid = conversationId { req["conversation_id"] = cid }
+        let reqData = try JSONSerialization.data(withJSONObject: req)
+        try await task.send(URLSessionWebSocketTask.Message.data(reqData))
+        
+        // Receive streaming response
+        var fullText = ""
+        var audioUrl = ""
+        var resultConvId = conversationId ?? ""
+        var durationMs = 0
+        
+        while true {
+            let message = try await task.receive()
+            switch message {
+            case URLSessionWebSocketTask.Message.data(let data):
+                if let json = try JSONSerialization.jsonObject(with: data) as? [String: String],
+                   let type = json["type"] {
+                    switch type {
+                    case "token":
+                        if let content = json["content"] {
+                            fullText += content
+                            await MainActor.run { streamingText = fullText }
+                        }
+                    case "done":
+                        audioUrl = json["audio_url"] ?? ""
+                        resultConvId = json["conversation_id"] ?? resultConvId
+                        durationMs = Int(json["duration_ms"] ?? "0") ?? 0
+                        task.cancel(with: .normalClosure, reason: nil)
+                        self.wsTask = nil
+                        return ChatResponse(
+                            replyText: fullText,
+                            audioUrl: audioUrl,
+                            conversationId: resultConvId,
+                            durationMs: durationMs
+                        )
+                    case "error":
+                        throw VoiceMateError.serverError(statusCode: 0, body: json["message"] ?? "WS error")
+                    default:
+                        break
+                    }
+                }
+            case URLSessionWebSocketTask.Message.string(let string):
+                if let data = string.data(using: .utf8),
+                   let json = try JSONSerialization.jsonObject(with: data) as? [String: String],
+                   json["type"] == "done" {
+                    audioUrl = json["audio_url"] ?? ""
+                    resultConvId = json["conversation_id"] ?? resultConvId
+                    durationMs = Int(json["duration_ms"] ?? "0") ?? 0
+                    fullText = json["full_text"] ?? fullText
+                    task.cancel(with: .normalClosure, reason: nil)
+                    self.wsTask = nil
+                    return ChatResponse(
+                        replyText: fullText,
+                        audioUrl: audioUrl,
+                        conversationId: resultConvId,
+                        durationMs: durationMs
+                    )
+                }
+            @unknown default:
+                break
+            }
         }
     }
     
