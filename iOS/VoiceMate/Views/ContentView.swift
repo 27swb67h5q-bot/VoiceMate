@@ -16,6 +16,8 @@ struct ContentView: View {
     @State private var textInput: String = ""
     @State private var streamingMessageId: UUID? = nil
     @State private var showPlusMenu = false
+    @State private var showEmotion: String? = nil
+    @State private var emotionMessageId: UUID? = nil
     
     enum InputMode {
         case text, voice
@@ -69,6 +71,8 @@ struct ContentView: View {
         .overlay(recordingOverlay)
         // Tap background to dismiss keyboard
         .onTapGesture { UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil) }
+        // Emotion animation overlay
+        .overlay(emotionOverlay)
     }
     
     // MARK: - Messages List
@@ -256,6 +260,38 @@ struct ContentView: View {
         }
     }
     
+    // MARK: - Emotion Animation
+    
+    @ViewBuilder
+    private var emotionOverlay: some View {
+        if let emotion = showEmotion {
+            Color.clear
+                .overlay(
+                    VStack {
+                        Spacer()
+                        HStack {
+                            Spacer()
+                            switch emotion {
+                            case "affectionate": Text("❤️").font(.system(size: 64)).transition(.scale)
+                            case "cheerful": Text("✨").font(.system(size: 64)).transition(.scale)
+                            case "sad": Text("🥺").font(.system(size: 64)).transition(.scale)
+                            case "angry": Text("😤").font(.system(size: 64)).transition(.scale)
+                            case "embarrassed": Text("☺️").font(.system(size: 64)).transition(.scale)
+                            default: EmptyView()
+                            }
+                            Spacer()
+                        }
+                        .padding(.bottom, 160)
+                    }
+                )
+                .onAppear {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        withAnimation { showEmotion = nil }
+                    }
+                }
+        }
+    }
+    
     // MARK: - Chat History Persistence
     
     private func saveMessages() {
@@ -300,6 +336,7 @@ struct ContentView: View {
                         messages[idx].duration = TimeInterval(r.durationMs) / 1000.0
                     }
                     saveMessages()
+                    if let emotion = r.emotion { showEmotion = emotion }
                 }
                 if let url = voiceService.audioURL(for: r.audioUrl) {
                     try? await voiceService.playAudio(from: url)
@@ -348,6 +385,7 @@ struct ContentView: View {
                     messages[idx].duration = TimeInterval(r.durationMs) / 1000.0
                 }
                 saveMessages()
+                if let emotion = r.emotion { showEmotion = emotion }
             }
             if let url = voiceService.audioURL(for: r.audioUrl) {
                 try? await voiceService.playAudio(from: url)
@@ -363,8 +401,8 @@ struct ContentView: View {
                     let m = ChatMessage(id: UUID(), isUser: false, text: fb.replyText, audioURL: fb.audioUrl, timestamp: Date(), duration: TimeInterval(fb.durationMs) / 1000.0)
                     messages.append(m)
                     saveMessages()
+                    if let emotion = fb.emotion { showEmotion = emotion }
                 }
-                if let u = voiceService.audioURL(for: fb.audioUrl) { try? await voiceService.playAudio(from: u) }
             }
         }
     }

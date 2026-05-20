@@ -93,6 +93,7 @@ class ChatResponse(BaseModel):
     audio_url: str
     conversation_id: str
     duration_ms: int
+    emotion: str = "gentle"
 
 
 # ── History Manager (conversation memory) ──────────────────────────────────────
@@ -184,6 +185,48 @@ class DeepSeekClient:
             yield "嗯，我听到你了。"
 
 
+# ── Emotion Detection ──────────────────────────────────────────────────────
+
+EMOTION_KEYWORDS = {
+    "affectionate": ["想你", "抱抱", "亲亲", "宝贝", "想你了", "撒娇", "人家", "嘛~", "啦~"],
+    "cheerful": ["哈哈", "开心", "太好", "真棒", "耶", "棒", "好开心", "真好", "嘻嘻"],
+    "sad": ["唉", "难过", "伤心", "不开心", "委屈", "哭", "难受", "呜呜", "失落"],
+    "angry": ["哼", "气", "生气", "烦", "讨厌", "气死", "真是的"],
+    "embarrassed": ["害羞", "不好意思", "脸红", "好害羞", "讨厌啦"],
+}
+
+EMOTION_STYLES = {
+    "affectionate": "affectionate",
+    "cheerful": "cheerful",
+    "sad": "sad",
+    "angry": "angry",
+    "embarrassed": "embarrassed",
+    "gentle": "gentle",
+}
+
+def detect_emotion(text: str) -> str:
+    for emotion, keywords in EMOTION_KEYWORDS.items():
+        if any(kw in text for kw in keywords):
+            return emotion
+    return "gentle"
+
+
+# ── SSML Builder ──────────────────────────────────────────────────────────
+
+def build_ssml(text: str, voice: str, emotion: str) -> str:
+    style = EMOTION_STYLES.get(emotion, "gentle")
+    degree = 2 if emotion in ("affectionate", "cheerful", "sad") else 1
+    return (
+        f'<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" '
+        f'xmlns:mstts="http://www.w3.org/2001/mstts" xml:lang="zh-CN">'
+        f'<voice name="{voice}">'
+        f'<mstts:express-as style="{style}" styledegree="{degree}">'
+        f'{text}'
+        f'</mstts:express-as>'
+        f'</voice></speak>'
+    )
+
+
 # ── TTS Engine (edge-tts) ───────────────────────────────────────────────────
 
 class TTSEngine:
@@ -192,28 +235,51 @@ class TTSEngine:
         self.rate = TTS_RATE
         self.volume = TTS_VOLUME
 
-    async def synthesize(self, text: str) -> tuple[str, int]:
-        """Convert text to speech, return (audio_path, duration_ms)."""
+    async def synthesize(self, text: str, emotion: str = "gentle") -> tuple[str, int]:
+        """Convert text to speech with emotion, return (audio_path, duration_ms)."""
         import edge_tts
 
         audio_id = str(uuid.uuid4())[:8]
+        raw_path = str(AUDIO_DIR / f"raw_{audio_id}.mp3")
         output_path = str(AUDIO_DIR / f"{audio_id}.mp3")
 
+        # Build SSML with detected emotion
+        ssml = build_ssml(text, self.voice, emotion)
         communicate = edge_tts.Communicate(
-            text,
+            ssml,
             self.voice,
             rate=self.rate,
             volume=self.volume,
         )
 
         start = time.time()
-        await communicate.save(output_path)
+        await communicate.save(raw_path)
         elapsed = time.time() - start
 
         # Rough estimate: edge-tts generates ~50 chars/sec for Chinese
         duration_ms = max(int((len(text) / 5) * 1000), 1000)
 
-        logger.info(f"TTS generated in {elapsed:.2f}s -> {output_path} ({duration_ms}ms)")
+        # Mix TTS with ambient background music
+        import subprocess
+        ambient_path = "/opt/voicemate_ambient.wav"
+        if Path(ambient_path).exists():
+            # Loop ambient to match speech duration, mix at low volume
+            subprocess.run([
+                "ffmpeg", "-y",
+                "-i", raw_path,
+                "-i", ambient_path,
+                "-filter_complex",
+                f"[1:a]aloop=loop=-1:size=480000,atrim=0:{duration_ms/1000:.1f}[amb];"
+                f"[0:a][amb]amix=inputs=2:duration=first:weights=1 0.25",
+                "-ac", "1", "-ar", "24000",
+                "-b:a", "48k",
+                output_path,
+            ], capture_output=True, timeout=30)
+        else:
+            # No ambient file, just copy
+            subprocess.run(["cp", raw_path, output_path], capture_output=True)
+
+        logger.info(f"TTS generated [{emotion}] in {elapsed:.2f}s -> {output_path} ({duration_ms}ms)")
         return output_path, duration_ms
 
 
@@ -261,10 +327,14 @@ async def chat(request: ChatRequest):
     # 2. Save to history
     history.append(conv_id, request.text, reply)
 
-    # 3. Generate TTS audio (use requested voice if provided)
+    # 3. Detect emotion from reply
+    emotion = detect_emotion(reply)
+    logger.info(f"Detected emotion: {emotion}")
+
+    # 4. Generate TTS audio with emotion and ambient
     if request.voice:
         tts.voice = request.voice
-    audio_path, duration_ms = await tts.synthesize(reply)
+    audio_path, duration_ms = await tts.synthesize(reply, emotion=emotion)
 
     # 3. Store conversation context (for future multi-turn support)
     if conv_id not in conversations:
@@ -282,6 +352,7 @@ async def chat(request: ChatRequest):
         audio_url=audio_url,
         conversation_id=conv_id,
         duration_ms=duration_ms,
+        emotion=emotion,
     )
 
 

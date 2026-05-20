@@ -21,12 +21,14 @@ struct ChatResponse: Codable {
     let audioUrl: String
     let conversationId: String
     let durationMs: Int
+    let emotion: String?
     
     enum CodingKeys: String, CodingKey {
         case replyText = "reply_text"
         case audioUrl = "audio_url"
         case conversationId = "conversation_id"
         case durationMs = "duration_ms"
+        case emotion
     }
 }
 
