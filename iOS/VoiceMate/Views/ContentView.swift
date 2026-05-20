@@ -305,7 +305,23 @@ struct ContentView: View {
                     try? await voiceService.playAudio(from: url)
                 }
             } catch {
+                // WebSocket failed - fall back to REST API
                 await MainActor.run { streamingMessageId = nil }
+                if let idx = messages.firstIndex(where: { $0.id == aiId }) {
+                    messages.remove(at: idx)
+                }
+                // Retry with REST API
+                if let fallback = try? await voiceService.sendMessage(text: text, conversationId: conversationId) {
+                    await MainActor.run {
+                        conversationId = fallback.conversationId
+                        let msg = ChatMessage(id: UUID(), isUser: false, text: fallback.replyText, audioURL: fallback.audioUrl, timestamp: Date(), duration: TimeInterval(fallback.durationMs) / 1000.0)
+                        messages.append(msg)
+                        saveMessages()
+                    }
+                    if let url = voiceService.audioURL(for: fallback.audioUrl) {
+                        try? await voiceService.playAudio(from: url)
+                    }
+                }
             }
         }
     }
@@ -338,6 +354,18 @@ struct ContentView: View {
             }
         } catch {
             await MainActor.run { streamingMessageId = nil }
+            if let idx = messages.firstIndex(where: { $0.id == aiId }) {
+                await MainActor.run { messages.remove(at: idx) }
+            }
+            if let fb = try? await voiceService.sendMessage(text: text, conversationId: conversationId) {
+                await MainActor.run {
+                    conversationId = fb.conversationId
+                    let m = ChatMessage(id: UUID(), isUser: false, text: fb.replyText, audioURL: fb.audioUrl, timestamp: Date(), duration: TimeInterval(fb.durationMs) / 1000.0)
+                    messages.append(m)
+                    saveMessages()
+                }
+                if let u = voiceService.audioURL(for: fb.audioUrl) { try? await voiceService.playAudio(from: u) }
+            }
         }
     }
     
