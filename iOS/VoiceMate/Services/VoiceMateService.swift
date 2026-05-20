@@ -16,6 +16,9 @@ class VoiceMateService: ObservableObject {
     @Published var selectedPersona: String = "love" {
         didSet { UserDefaults.standard.set(selectedPersona, forKey: "selected_persona") }
     }
+    @Published var speechSpeed: Double = 1.0 {
+        didSet { UserDefaults.standard.set(speechSpeed, forKey: "speech_speed") }
+    }
     
     private var baseURL: String {
         "http://\(serverHost):\(serverPort)"
@@ -36,6 +39,8 @@ class VoiceMateService: ObservableObject {
         self.serverPort = UserDefaults.standard.string(forKey: "server_port") ?? "8000"
         self.selectedVoice = UserDefaults.standard.string(forKey: "selected_voice") ?? "zh-CN-XiaoxiaoNeural"
         self.selectedPersona = UserDefaults.standard.string(forKey: "selected_persona") ?? "love"
+        self.speechSpeed = UserDefaults.standard.double(forKey: "speech_speed")
+        if self.speechSpeed == 0 { self.speechSpeed = 1.0 }
         
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 30
@@ -59,7 +64,8 @@ class VoiceMateService: ObservableObject {
             text: text,
             conversationId: conversationId,
             voice: selectedVoice,
-            persona: selectedPersona
+            persona: selectedPersona,
+            speed: speechSpeed
         )
         request.httpBody = try JSONEncoder().encode(body)
         
@@ -117,7 +123,7 @@ class VoiceMateService: ObservableObject {
         self.wsTask = task
         task.resume()
         
-        var req: [String: Any] = ["text": text, "voice": selectedVoice, "persona": selectedPersona]
+        var req: [String: Any] = ["text": text, "voice": selectedVoice, "persona": selectedPersona, "speed": speechSpeed]
         if let cid = conversationId { req["conversation_id"] = cid }
         let reqData = try JSONSerialization.data(withJSONObject: req)
         try await task.send(URLSessionWebSocketTask.Message.data(reqData))
@@ -128,45 +134,66 @@ class VoiceMateService: ObservableObject {
         var durationMs = 0
         
         while true {
-            let message = try await task.receive()
+            let message: URLSessionWebSocketTask.Message
+            do {
+                message = try await task.receive()
+            } catch {
+                // WebSocket connection closed or failed
+                self.wsTask = nil
+                throw error
+            }
+            
+            let json: [String: Any]
             switch message {
-            case URLSessionWebSocketTask.Message.data(let data):
-                if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let type = json["type"] as? String {
-                    switch type {
-                    case "token":
-                        if let content = json["content"] as? String {
-                            fullText += content
-                            await MainActor.run { [fullText] in streamingText = fullText }
-                        }
-                    case "done":
-                        audioUrl = json["audio_url"] as? String ?? ""
-                        resultConvId = json["conversation_id"] as? String ?? resultConvId
-                        durationMs = json["duration_ms"] as? Int ?? 0
-                        let emotion = json["emotion"] as? String
-                        task.cancel(with: .normalClosure, reason: nil)
-                        self.wsTask = nil
-                        return ChatResponse(replyText: fullText, audioUrl: audioUrl, conversationId: resultConvId, durationMs: durationMs, emotion: emotion)
-                    case "error":
-                        throw VoiceMateError.serverError(statusCode: 0, body: json["message"] as? String ?? "WS error")
-                    default:
-                        break
-                    }
+            case .data(let data):
+                guard let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    continue
                 }
-            case URLSessionWebSocketTask.Message.string(let string):
-                if let data = string.data(using: .utf8),
-                   let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   (json["type"] as? String) == "done" {
-                    audioUrl = json["audio_url"] as? String ?? ""
-                    resultConvId = json["conversation_id"] as? String ?? resultConvId
-                    durationMs = json["duration_ms"] as? Int ?? 0
-                    fullText = json["full_text"] as? String ?? fullText
-                    let emotion = json["emotion"] as? String
-                    task.cancel(with: .normalClosure, reason: nil)
-                    self.wsTask = nil
-                    return ChatResponse(replyText: fullText, audioUrl: audioUrl, conversationId: resultConvId, durationMs: durationMs, emotion: emotion)
+                json = parsed
+            case .string(let string):
+                guard let data = string.data(using: .utf8),
+                      let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    continue
                 }
+                json = parsed
             @unknown default:
+                continue
+            }
+            
+            guard let type = json["type"] as? String else { continue }
+            
+            switch type {
+            case "token":
+                if let content = json["content"] as? String {
+                    fullText += content
+                    await MainActor.run { self.streamingText = fullText }
+                }
+            case "done":
+                audioUrl = json["audio_url"] as? String ?? ""
+                resultConvId = json["conversation_id"] as? String ?? resultConvId
+                durationMs = json["duration_ms"] as? Int ?? 0
+                let emotion = json["emotion"] as? String
+                // Prefer full_text if available (string messages), otherwise use accumulated fullText
+                if let finalText = json["full_text"] as? String {
+                    fullText = finalText
+                }
+                task.cancel(with: .normalClosure, reason: nil)
+                self.wsTask = nil
+                return ChatResponse(
+                    replyText: fullText,
+                    audioUrl: audioUrl,
+                    conversationId: resultConvId,
+                    durationMs: durationMs,
+                    emotion: emotion
+                )
+            case "error":
+                task.cancel(with: .normalClosure, reason: nil)
+                self.wsTask = nil
+                throw VoiceMateError.serverError(
+                    statusCode: 0,
+                    body: json["message"] as? String ?? "WebSocket error"
+                )
+            default:
                 break
             }
         }

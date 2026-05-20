@@ -38,11 +38,13 @@ struct ChatRequest: Codable {
     let conversationId: String?
     let voice: String?  // TTS voice name
     let persona: String?  // AI personality
+    let speed: Double?  // TTS speed ratio (0.5-2.0, 1.0 = normal)
     
     enum CodingKeys: String, CodingKey {
         case text
         case conversationId = "conversation_id"
         case voice
         case persona
+        case speed
     }
 }

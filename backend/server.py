@@ -14,6 +14,7 @@ Endpoints:
 
 import os
 import sys
+import re
 import uuid
 import json
 import asyncio
@@ -21,6 +22,15 @@ import logging
 import time
 from pathlib import Path
 from typing import Optional
+
+
+import torch
+import soundfile as sf
+import numpy as np
+
+# ChatTTS compatibility: PyTorch 2.12+ requires weights_only=False for tokenizer
+import ChatTTS.core as _chattts_core
+# The tokenizer path is already patched to use weights_only=False
 
 # Load .env file if present
 from dotenv import load_dotenv
@@ -49,11 +59,11 @@ TTS_VOLUME = os.environ.get("VOICEMATE_TTS_VOLUME", "+0%")
 
 # System prompts for different personas
 PERSONAS = {
-    "warm": "你是一个温暖的陪聊伙伴。用自然的口语回复，像是在跟好朋友聊天。回复要简短自然，适合语音播放。控制在100字以内。不要用Markdown格式。用中文回复。",
-    "love": "你现在是一个恋爱脑女友。你超喜欢用户，说话撒娇黏人、甜甜的、带语气词。你会吃醋、会想念、会撒娇要抱抱。用自然的恋爱语气回复，简短一点，适合语音播放。控制在80字以内。不要用Markdown格式。用中文回复。",
-    "sister": "你是一个知心姐姐。温柔、善解人意，给人温暖的建议和开导。说话像大姐姐一样体贴。回复要简短自然，适合语音播放。控制在100字以内。用中文回复。",
-    "tsundere": "你是一个傲娇毒舌的角色。嘴上不饶人但其实关心用户。说话带吐槽和嫌弃的语气，但偶尔流露真实的关心。回复要简短，适合语音播放。控制在80字以内。用中文回复。",
-    "genki": "你是一个元气少女。活力满满、乐观开朗，说话带感叹号和拟声词。总是积极向上，像小太阳一样温暖。回复要简短活泼，适合语音播放。控制在80字以内。用中文回复。",
+    "love": "说人话，不要书面语。用短句+语气词（嗯、啊、呢、吧、嘛、啦、哦、呀）。像真人微信语音消息一样自然。你现在是一个恋爱脑女友。你超喜欢用户，说话撒娇黏人、甜甜的、带语气词。你会吃醋、会想念、会撒娇要抱抱。控制在80字以内。不要用Markdown格式。用中文回复。",
+    "warm": "说人话，不要书面语。用短句+语气词（嗯、啊、呢、吧、嘛、啦、哦、呀）。像真人微信语音消息一样自然。你是一个温暖的陪聊伙伴。用自然的口语回复，像是在跟好朋友聊天。控制在100字以内。不要用Markdown格式。用中文回复。",
+    "sister": "说人话，不要书面语。用短句+语气词（嗯、啊、呢、吧、嘛、啦、哦、呀）。像真人微信语音消息一样自然。你是一个知心姐姐。温柔、善解人意，给人温暖的建议和开导。说话像大姐姐一样体贴。控制在100字以内。用中文回复。",
+    "tsundere": "说人话，不要书面语。用短句+语气词（嗯、啊、呢、吧、嘛、啦、哦、呀）。像真人微信语音消息一样自然。你是一个傲娇毒舌的角色。嘴上不饶人但其实关心用户。说话带吐槽和嫌弃的语气，但偶尔流露真实的关心。控制在80字以内。用中文回复。",
+    "genki": "说人话，不要书面语。用短句+语气词（嗯、啊、呢、吧、嘛、啦、哦、呀）。像真人微信语音消息一样自然。你是一个元气少女。活力满满、乐观开朗，说话带感叹号和拟声词。总是积极向上，像小太阳一样温暖。控制在80字以内。用中文回复。",
 }
 
 DEFAULT_PERSONA = "love"
@@ -86,6 +96,7 @@ class ChatRequest(BaseModel):
     conversation_id: Optional[str] = None
     voice: Optional[str] = None  # Override TTS voice
     persona: Optional[str] = None  # Character personality
+    speed: Optional[float] = None  # TTS speed ratio (0.5-2.0, 1.0 = normal)
 
 
 class ChatResponse(BaseModel):
@@ -195,15 +206,6 @@ EMOTION_KEYWORDS = {
     "embarrassed": ["害羞", "不好意思", "脸红", "好害羞", "讨厌啦"],
 }
 
-EMOTION_STYLES = {
-    "affectionate": "affectionate",
-    "cheerful": "cheerful",
-    "sad": "sad",
-    "angry": "angry",
-    "embarrassed": "embarrassed",
-    "gentle": "gentle",
-}
-
 def detect_emotion(text: str) -> str:
     for emotion, keywords in EMOTION_KEYWORDS.items():
         if any(kw in text for kw in keywords):
@@ -211,50 +213,251 @@ def detect_emotion(text: str) -> str:
     return "gentle"
 
 
-# ── SSML Builder ──────────────────────────────────────────────────────────
 
-def build_ssml(text: str, voice: str, emotion: str) -> str:
-    style = EMOTION_STYLES.get(emotion, "gentle")
-    degree = 2 if emotion in ("affectionate", "cheerful", "sad") else 1
-    return (
-        f'<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" '
-        f'xmlns:mstts="http://www.w3.org/2001/mstts" xml:lang="zh-CN">'
-        f'<voice name="{voice}">'
-        f'<mstts:express-as style="{style}" styledegree="{degree}">'
-        f'{text}'
-        f'</mstts:express-as>'
-        f'</voice></speak>'
-    )
+# ── Markdown Strip ─────────────────────────────────────────────────────────
+
+def strip_markdown(text: str) -> str:
+    """Remove common Markdown artifacts from AI reply text."""
+    # Remove triple-backtick code blocks (```...```)
+    text = re.sub(r'```[\s\S]*?```', '', text)
+    # Remove inline backtick code
+    text = re.sub(r'`([^`\n]+)`', r'\1', text)
+    # Remove bold double-asterisk
+    text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
+    # Remove italic single-asterisk
+    text = re.sub(r'(?<!\*)\*(?!\*)(.*?)(?<!\*)\*(?!\*)', r'\1', text)
+    # Clean up extra whitespace
+    text = re.sub(r'\n\s*\n', '\n', text).strip()
+    return text
+
+
+
+# ── Naturalize Text ─────────────────────────────────────────────────────
+
+def naturalize_text(text: str) -> str:
+    """Post-process AI text to sound more natural for TTS."""
+    # Ensure text ends with punctuation that sounds natural
+    # If no sentence-ending punctuation, add ~ or 。
+    if text and text[-1] not in "。！？.!?~～":
+        text += "～"
+    # Ensure there's at least one pause (comma) in longer sentences
+    # If a sentence is >30 chars with no comma, insert one
+    if len(text) > 30 and "，" not in text and "、" not in text:
+        # Find a natural break point after ~15 chars
+        mid = min(len(text) // 2, 20)
+        # Find next space or content word boundary
+        insert_at = mid
+        for i in range(mid, min(mid + 5, len(text))):
+            if text[i] in "的了在是把不就这那":
+                insert_at = i
+                break
+        text = text[:insert_at] + "，" + text[insert_at:]
+    return text
+
+# ── ChatTTS Engine (local GPU, primary) ──────────────────────────────────
+
+class ChatTTSEngine:
+    """ChatTTS: conversational TTS running locally on GPU (RTX 4060)."""
+    def __init__(self):
+        self.model = None
+        self.loaded = False
+
+    async def synthesize(self, text: str, emotion: str = "gentle", speed_ratio: Optional[float] = None) -> tuple[str, int]:
+        import ChatTTS, time, uuid
+        import soundfile as sf
+        import numpy as np
+        import os
+        os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+
+        if not self.loaded:
+            logger.info("Loading ChatTTS model on GPU...")
+            self.model = ChatTTS.Chat()
+            self.model.load_models()
+            self.loaded = True
+            logger.info("ChatTTS model loaded")
+
+        # Use speed_ratio if provided, else fall back to emotion-based speed
+        if speed_ratio is not None:
+            speed = max(3, min(9, int(round(speed_ratio * 5))))
+        else:
+            speed_map = {
+                "cheerful": 7, "affectionate": 5, "sad": 3,
+                "angry": 6, "embarrassed": 4, "gentle": 5,
+            }
+            speed = speed_map.get(emotion, 5)
+        start = time.time()
+        wavs = self.model.infer(
+            [text],
+            skip_refine_text=True,
+            params_refine_text={},
+            params_infer_code={'prompt': f'[speed_{speed}]'},
+            use_decoder=True,
+        )
+        elapsed = time.time() - start
+
+        audio_id = str(uuid.uuid4())[:8]
+        output_path = str(AUDIO_DIR / f"{audio_id}.wav")
+        sf.write(output_path, wavs[0].T, 24000)
+
+        duration_ms = max(int((wavs[0].shape[1] / 24000) * 1000), 1000)
+        logger.info(f"ChatTTS [{emotion}] in {elapsed:.2f}s -> {output_path}")
+        return output_path, duration_ms
 
 
 # ── TTS Engine (edge-tts) ───────────────────────────────────────────────────
+# ── Volcengine TTS Engine (optional, fallback to edge-tts) ────────────────
+
+class VolcengineTTS:
+    def __init__(self):
+        self.appid = os.environ.get("VOLC_APPID", "")
+        self.token = os.environ.get("VOLC_TOKEN", "")
+        self.cluster = os.environ.get("VOLC_CLUSTER", "volcano_tts")
+        self.voice = os.environ.get("VOLC_VOICE", "BV700_V2_streaming")
+        self.api_url = "https://openspeech.bytedance.com/api/v1/tts"
+
+    async def synthesize(self, text, voice_type=None, emotion="gentle", speed_ratio: Optional[float] = None):
+        import aiohttp
+        import uuid
+        import base64
+
+        vt = voice_type or self.voice
+        reqid = str(uuid.uuid4())[:8]
+
+        emotion_map = {
+            "cheerful": "happy",
+            "affectionate": "affectionate",
+            "sad": "sad",
+            "angry": "angry",
+            "embarrassed": "embarrassed",
+            "gentle": "gentle",
+        }
+        emotion_param = emotion_map.get(emotion, "gentle")
+
+        payload = {
+            "app": {"appid": self.appid, "token": "anything", "cluster": self.cluster},
+            "user": {"uid": "voicemate"},
+            "audio": {
+                "voice_type": vt,
+                "encoding": "wav",
+                "speed_ratio": speed_ratio if speed_ratio is not None else 1.1,
+                "volume_ratio": 1.0,
+                "pitch_ratio": 1.0,
+            },
+            "request": {
+                "reqid": reqid,
+                "text": text,
+                "text_type": "plain",
+                "operation": "query",
+                "with_frontend": 1,
+                "frontend_type": "unitTson",
+                "emotion": emotion_param,
+            }
+        }
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer;{self.token}"
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(self.api_url, json=payload, headers=headers) as resp:
+                result = await resp.json()
+                if resp.status != 200 or "data" not in result:
+                    raise Exception(f"Volcengine error: {result.get('message', str(result))[:200]}")
+                audio_data = base64.b64decode(result["data"])
+            audio_id = str(uuid.uuid4())[:8]
+            output_path = str(AUDIO_DIR / f"{audio_id}.wav")
+            with open(output_path, "wb") as f:
+                f.write(audio_data)
+            logger.info(f"Volcengine TTS [{emotion}] -> {output_path}")
+            return output_path
+
 
 class TTSEngine:
     def __init__(self):
         self.voice = TTS_VOICE
         self.rate = TTS_RATE
         self.volume = TTS_VOLUME
+        self.pitch = "+0Hz"
+        self.chattts = ChatTTSEngine()
+        self.volc = VolcengineTTS()
 
-    async def synthesize(self, text: str, emotion: str = "gentle") -> tuple[str, int]:
-        """Convert text to speech with emotion, return (audio_path, duration_ms)."""
+    async def synthesize(self, text: str, emotion: str = "gentle", speed_ratio: Optional[float] = None) -> tuple[str, int]:
+        """Convert text to speech with emotion, return (audio_path, duration_ms).
+        
+        Priority: ChatTTS (local GPU) → Volcengine (cloud API) → edge_tts (fallback)
+        """
+        # 1) ChatTTS (local GPU, most natural)
+        try:
+            return await self.chattts.synthesize(text, emotion=emotion, speed_ratio=speed_ratio)
+        except Exception as e:
+            logger.warning(f"ChatTTS failed, falling back: {e}")
+
+        # 2) Volcengine if configured
+        if self.volc.appid and self.volc.token:
+            try:
+                path = await self.volc.synthesize(text, emotion=emotion, speed_ratio=speed_ratio)
+                duration_ms = max(int((len(text) / 5) * 1000), 1000)
+                logger.info(f"Volcengine TTS generated [{emotion}] -> {path} ({duration_ms}ms)")
+                return path, duration_ms
+            except Exception as e:
+                logger.warning(f"Volcengine TTS failed, falling back to edge-tts: {e}")
+
+        # 3) edge_tts fallback
         import edge_tts
 
         audio_id = str(uuid.uuid4())[:8]
         raw_path = str(AUDIO_DIR / f"raw_{audio_id}.mp3")
         output_path = str(AUDIO_DIR / f"{audio_id}.mp3")
 
-        # Build SSML with detected emotion
-        ssml = build_ssml(text, self.voice, emotion)
+        # Emotion-to-voice mapping — override voice temporarily per emotion
+        EMOTION_VOICES = {
+            "cheerful": "zh-CN-XiaoyiNeural",
+            "affectionate": "zh-CN-XiaoxiaoNeural",
+            "sad": "zh-CN-XiaoxiaoNeural",
+            "angry": "zh-CN-XiaoxiaoNeural",
+            "embarrassed": "zh-CN-XiaoyiNeural",
+            "gentle": "zh-CN-XiaoxiaoNeural",
+        }
+        EMOTION_TTS_PARAMS = {
+            "cheerful":      {"rate": "+15%", "pitch": "+30Hz"},
+            "affectionate":  {"rate": "+5%",  "pitch": "+15Hz"},
+            "sad":           {"rate": "-10%", "pitch": "-20Hz"},
+            "angry":         {"rate": "+5%",  "pitch": "-15Hz"},
+            "embarrassed":   {"rate": "+0%",  "pitch": "+20Hz"},
+            "gentle":        {"rate": "+0%",  "pitch": "+0Hz"},
+        }
+
+        # Save original state to restore after TTS
+        orig_voice = self.voice
+        orig_rate = self.rate
+        orig_pitch = self.pitch
+        orig_volume = self.volume
+
+        # Apply emotion overrides for this call only
+        self.voice = EMOTION_VOICES.get(emotion, self.voice)
+        emotion_params = EMOTION_TTS_PARAMS.get(emotion, {})
+        self.rate = emotion_params.get("rate", self.rate)
+        self.pitch = emotion_params.get("pitch", self.pitch)
+
+
         communicate = edge_tts.Communicate(
-            ssml,
+            text,
             self.voice,
             rate=self.rate,
             volume=self.volume,
+            pitch=self.pitch,
         )
 
         start = time.time()
         await communicate.save(raw_path)
         elapsed = time.time() - start
+
+        # Restore original state so it doesn't leak between requests
+        self.voice = orig_voice
+        self.rate = orig_rate
+        self.pitch = orig_pitch
+        self.volume = orig_volume
 
         # Rough estimate: edge-tts generates ~50 chars/sec for Chinese
         duration_ms = max(int((len(text) / 5) * 1000), 1000)
@@ -281,7 +484,6 @@ class TTSEngine:
 
         logger.info(f"TTS generated [{emotion}] in {elapsed:.2f}s -> {output_path} ({duration_ms}ms)")
         return output_path, duration_ms
-
 
 # ── Initialize Services ─────────────────────────────────────────────────────
 
@@ -324,7 +526,11 @@ async def chat(request: ChatRequest):
     persona = request.persona or DEFAULT_PERSONA
     reply = await deepseek.chat(request.text, conv_id, history=conv_history, persona=persona)
 
-    # 2. Save to history
+    # Strip markdown from reply before TTS and history storage
+    reply = strip_markdown(reply)
+    reply = naturalize_text(reply)
+
+    # Save to history
     history.append(conv_id, request.text, reply)
 
     # 3. Detect emotion from reply
@@ -334,7 +540,7 @@ async def chat(request: ChatRequest):
     # 4. Generate TTS audio with emotion and ambient
     if request.voice:
         tts.voice = request.voice
-    audio_path, duration_ms = await tts.synthesize(reply, emotion=emotion)
+    audio_path, duration_ms = await tts.synthesize(reply, emotion=emotion, speed_ratio=request.speed)
 
     # 3. Store conversation context (for future multi-turn support)
     if conv_id not in conversations:
@@ -512,13 +718,17 @@ async def ws_chat(websocket: WebSocket):
             full_reply += token
             await websocket.send_json({"type": "token", "content": token})
 
+        # Strip markdown before TTS and history storage
+        clean_reply = strip_markdown(full_reply)
+        clean_reply = naturalize_text(clean_reply)
+
         # Save history
-        history.append(conv_id, text, full_reply)
+        history.append(conv_id, text, clean_reply)
 
         # Generate TTS
         if voice_name:
             tts.voice = voice_name
-        audio_path, duration_ms = await tts.synthesize(full_reply)
+        audio_path, duration_ms = await tts.synthesize(clean_reply)
         audio_url = f"/v1/audio/{os.path.basename(audio_path)}"
 
         await websocket.send_json({
@@ -526,7 +736,7 @@ async def ws_chat(websocket: WebSocket):
             "audio_url": audio_url,
             "conversation_id": conv_id,
             "duration_ms": duration_ms,
-            "full_text": full_reply,
+            "full_text": clean_reply,
         })
     except WebSocketDisconnect:
         logger.info("WS client disconnected")
@@ -554,6 +764,28 @@ async def ws_chat(websocket: WebSocket):
 #     ...
 
 
+# ── Proactive Push Messages ──────────────────────────────────────────────────
+
+@app.get("/v1/proactive")
+async def get_proactive_message(persona: str = "love"):
+    import random
+    PROACTIVE_MSGS = {
+        "love": [
+            "宝贝～在干嘛呢？人家想你了～",
+            "你今天都没找我，我好委屈呀……",
+            "悄悄告诉你，我今天梦到你了～",
+            "在吗在吗？快出来陪我聊聊天～",
+        ],
+        "warm": ["今天过得怎么样？想聊聊吗？", "天气不错，心情好吗？", "突然想起你了，来打个招呼～"],
+        "tsundere": ["哼，才不是特意找你的！", "干嘛呢干嘛呢，半天不说话", "喂，在不在？"],
+        "genki": ["嗨嗨嗨！我来啦！", "元气满满的一天又开始啦！", "快出来快出来，有好玩的事！"],
+        "sister": ["今天有没有好好吃饭？", "遇到什么烦心事了吗？跟姐姐说说"],
+    }
+    msgs = PROACTIVE_MSGS.get(persona, PROACTIVE_MSGS["love"])
+    text = random.choice(msgs)
+    return {"text": text, "persona": persona}
+
+
 # ── Main ────────────────────────────────────────────────────────────────────
 
 def main():
@@ -577,3 +809,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+

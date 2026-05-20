@@ -19,6 +19,13 @@ struct ContentView: View {
     @State private var showEmotion: String? = nil
     @State private var emotionMessageId: UUID? = nil
     
+    // Proactive timer
+    @State private var proactiveTimer: Timer? = nil
+    @AppStorage("proactive_enabled") private var proactiveEnabled = true
+    
+    // Real-time call
+    @State private var showRealtimeCall = false
+    
     enum InputMode {
         case text, voice
     }
@@ -55,6 +62,9 @@ struct ContentView: View {
             .sheet(isPresented: $showSettings) {
                 SettingsView(service: voiceService)
             }
+            .sheet(isPresented: $showRealtimeCall) {
+                RealtimeCallView()
+            }
             .alert("连接失败", isPresented: $showConnectionError) {
                 Button("设置", action: { showSettings = true })
                 Button("重试") { checkConnection() }
@@ -64,6 +74,14 @@ struct ContentView: View {
             .onAppear {
                 loadMessages()
                 checkConnection()
+                startProactiveTimer()
+            }
+            .onDisappear {
+                proactiveTimer?.invalidate()
+                proactiveTimer = nil
+            }
+            .onChange(of: proactiveEnabled) { _ in
+                startProactiveTimer()
             }
         }
         .preferredColorScheme(.dark)
@@ -142,7 +160,7 @@ struct ContentView: View {
                         .foregroundColor(.gray)
                 }
                 .confirmationDialog("更多功能", isPresented: $showPlusMenu) {
-                    Button("实时通话", systemImage: "phone.fill") { }
+                    Button("实时通话", systemImage: "phone.fill") { showRealtimeCall = true }
                     Button("取消", role: .cancel) { }
                 } message: {
                     Text("选择功能")
@@ -407,6 +425,42 @@ struct ContentView: View {
         }
     }
     
+    // MARK: - Proactive Timer
+    
+    /// Start the proactive timer that periodically checks for AI-initiated messages
+    private func startProactiveTimer() {
+        proactiveTimer?.invalidate()
+        let interval: TimeInterval = proactiveEnabled ? 180 : 0 // 3 minutes
+        guard interval > 0 else { return }
+        proactiveTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            guard let self = self, self.proactiveEnabled else { return }
+            Task { await self.fireProactive() }
+        }
+    }
+    
+    /// Fire a proactive check to the backend
+    private func fireProactive() async {
+        guard let url = URL(string: "http://\(voiceService.serverHost):\(voiceService.serverPort)/v1/proactive?persona=\(voiceService.selectedPersona)") else { return }
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else { return }
+            if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let text = json["text"] as? String, !text.isEmpty {
+                let emotion = json["emotion"] as? String
+                await MainActor.run {
+                    let msg = ChatMessage(id: UUID(), isUser: false, text: text, audioURL: nil, timestamp: Date())
+                    messages.append(msg)
+                    saveMessages()
+                    if let e = emotion { showEmotion = e }
+                }
+            }
+        } catch {
+            // Silently ignore proactive failures — not critical
+        }
+    }
+    
+    // MARK: - Connection Check
+    
     private func checkConnection() {
         Task {
             let healthy = await voiceService.checkHealth()
@@ -522,6 +576,32 @@ struct SettingsView: View {
                     Text("选择 AI 回复时使用的语音")
                         .font(.caption)
                         .foregroundColor(.gray)
+                }
+                
+                Section("主动推送") {
+                    Toggle("启用主动推送", isOn: Binding(
+                        get: { UserDefaults.standard.bool(forKey: "proactive_enabled") },
+                        set: { newValue in
+                            UserDefaults.standard.set(newValue, forKey: "proactive_enabled")
+                        }
+                    ))
+                    Text("开启后，AI 会每隔 3 分钟主动发起对话")
+                        .font(.caption)
+                        .foregroundColor(.gray)
+                }
+                
+                Section("语速") {
+                    VStack {
+                        Slider(value: $service.speechSpeed, in: 0.5...2.0, step: 0.1)
+                        HStack {
+                            Text("慢").foregroundColor(.gray)
+                            Spacer()
+                            Text("\(service.speechSpeed, specifier: "%.1f")x")
+                            Spacer()
+                            Text("快").foregroundColor(.gray)
+                        }
+                        .font(.caption)
+                    }
                 }
                 
                 Section("人设") {
