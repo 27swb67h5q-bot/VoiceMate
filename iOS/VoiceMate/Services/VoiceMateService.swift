@@ -24,7 +24,6 @@ class VoiceMateService: ObservableObject {
     
     private var audioPlayer: AVAudioPlayer?
     private let session: URLSession
-    @Published var streamingText: String = ""  // Current streaming response text
     
     init() {
         // Load saved config or use defaults (persists across reboots)
@@ -95,83 +94,6 @@ class VoiceMateService: ObservableObject {
             self.audioPlayer = try? AVAudioPlayer(contentsOf: tempURL)
             self.audioPlayer?.prepareToPlay()
             self.audioPlayer?.play()
-        }
-    }
-    
-    /// Send message via WebSocket streaming (token by token)
-    func sendMessageStream(text: String, conversationId: String?) async throws -> ChatResponse {
-        await MainActor.run {
-            isProcessing = true
-            streamingText = ""
-        }
-        defer { Task { @MainActor in isProcessing = false } }
-        
-        let wsURL = URL(string: "ws://\(serverHost):\(serverPort)/v1/ws/chat")!
-        let wsTask = session.webSocketTask(with: wsURL)
-        wsTask.resume()
-        
-        // Send request
-        var req: [String: Any] = ["text": text]
-        if let cid = conversationId { req["conversation_id"] = cid }
-        req["voice"] = selectedVoice
-        let reqData = try JSONSerialization.data(withJSONObject: req)
-        try await wsTask.send(.data(reqData))
-        
-        // Receive messages
-        var fullText = ""
-        var audioUrl = ""
-        var resultConvId = conversationId ?? ""
-        var durationMs = 0
-        
-        while true {
-            let message = try await wsTask.receive()
-            switch message {
-            case .data(let data):
-                if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let type = json["type"] as? String {
-                    switch type {
-                    case "token":
-                        if let content = json["content"] as? String {
-                            fullText += content
-                            await MainActor.run { streamingText = fullText }
-                        }
-                    case "done":
-                        audioUrl = json["audio_url"] as? String ?? ""
-                        resultConvId = json["conversation_id"] as? String ?? ""
-                        durationMs = json["duration_ms"] as? Int ?? 0
-                        await wsTask.cancel(with: .normalClosure, reason: nil)
-                        return ChatResponse(
-                            replyText: fullText,
-                            audioUrl: audioUrl,
-                            conversationId: resultConvId,
-                            durationMs: durationMs
-                        )
-                    case "error":
-                        throw VoiceMateError.serverError(statusCode: 0, body: json["message"] as? String ?? "WS error")
-                    default:
-                        break
-                    }
-                }
-            case .string(let string):
-                // Fallback for text-based messages
-                if let data = string.data(using: .utf8),
-                   let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let type = json["type"] as? String, type == "done" {
-                    audioUrl = json["audio_url"] as? String ?? ""
-                    resultConvId = json["conversation_id"] as? String ?? ""
-                    durationMs = json["duration_ms"] as? Int ?? 0
-                    fullText = json["full_text"] as? String ?? fullText
-                    await wsTask.cancel(with: .normalClosure, reason: nil)
-                    return ChatResponse(
-                        replyText: fullText,
-                        audioUrl: audioUrl,
-                        conversationId: resultConvId,
-                        durationMs: durationMs
-                    )
-                }
-            @unknown default:
-                break
-            }
         }
     }
     
