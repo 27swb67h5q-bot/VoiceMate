@@ -34,6 +34,12 @@ class VoiceMateService: ObservableObject {
     private var wsTask: URLSessionWebSocketTask?
     
     init() {
+        // Initialize session first (required before accessing any @Published properties)
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForResource = 60
+        self.session = URLSession(configuration: config)
+        
         // Load saved config or use defaults (persists across reboots)
         self.serverHost = UserDefaults.standard.string(forKey: "server_host") ?? "192.168.10.227"
         self.serverPort = UserDefaults.standard.string(forKey: "server_port") ?? "8000"
@@ -41,11 +47,6 @@ class VoiceMateService: ObservableObject {
         self.selectedPersona = UserDefaults.standard.string(forKey: "selected_persona") ?? "love"
         self.speechSpeed = UserDefaults.standard.double(forKey: "speech_speed")
         if self.speechSpeed == 0 { self.speechSpeed = 1.0 }
-        
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 30
-        config.timeoutIntervalForResource = 60
-        self.session = URLSession(configuration: config)
     }
     
     // MARK: - API Calls
