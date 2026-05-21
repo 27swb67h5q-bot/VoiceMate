@@ -46,7 +46,7 @@ import uvicorn
 
 HOST = os.environ.get("VOICEMATE_HOST", "0.0.0.0")
 PORT = int(os.environ.get("VOICEMATE_PORT", "8000"))
-AUDIO_DIR = Path(os.environ.get("VOICEMATE_AUDIO_DIR", "/tmp/voicemate_audio"))
+AUDIO_DIR = Path(os.environ.get("VOICEMATE_AUDIO_DIR", "/root/VoiceMate/audio_cache"))
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")

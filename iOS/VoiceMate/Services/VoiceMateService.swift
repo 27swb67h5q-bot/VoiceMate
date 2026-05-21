@@ -90,23 +90,32 @@ class VoiceMateService: ObservableObject {
         URL(string: "\(baseURL)\(path)")
     }
     
-    /// Play an audio file from the server
-    func playAudio(from url: URL) async throws {
-        let (data, _) = try await session.data(from: url)
+    /// Play an audio file — uses local cache if available, otherwise downloads + caches
+    func playAudio(from url: URL, remotePath: String? = nil) async throws {
+        let localURL: URL
         
-        let ext = url.lastPathComponent.hasSuffix(".wav") ? "wav" : "mp3"
-        let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension(ext)
-        
-        try data.write(to: tempURL)
+        if let path = remotePath, AudioCache.isCached(remotePath: path) {
+            // Play from local cache
+            localURL = AudioCache.localURL(for: path)
+        } else if let path = remotePath {
+            // Download and cache
+            localURL = try await AudioCache.cache(from: url, remotePath: path)
+        } else {
+            // No remotePath given — download to temp (legacy path)
+            let (data, _) = try await session.data(from: url)
+            let ext = url.lastPathComponent.hasSuffix(".wav") ? "wav" : "mp3"
+            localURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString)
+                .appendingPathExtension(ext)
+            try data.write(to: localURL)
+        }
         
         await MainActor.run {
             // Route audio to speaker (not earpiece)
             try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
             try? AVAudioSession.sharedInstance().setActive(true)
             
-            self.audioPlayer = try? AVAudioPlayer(contentsOf: tempURL)
+            self.audioPlayer = try? AVAudioPlayer(contentsOf: localURL)
             self.audioPlayer?.prepareToPlay()
             self.audioPlayer?.play()
         }

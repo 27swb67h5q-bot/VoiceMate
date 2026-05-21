@@ -3,7 +3,6 @@
 # Sources DeepSeek API key from Hermes config automatically
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-HERMES_VENV="/usr/local/lib/hermes-agent/venv"
 HERMES_ENV="$HOME/.hermes/.env"
 
 # Load Hermes .env (only DEEPSEEK_API_KEY)
@@ -12,8 +11,5 @@ if [ -f "$HERMES_ENV" ]; then
     export DEEPSEEK_API_KEY
 fi
 
-# Activate Hermes venv
-source "$HERMES_VENV/bin/activate"
-
-# Start server
-exec python3 "$SCRIPT_DIR/server.py" "$@"
+# Use local venv (has torch + ChatTTS)
+exec "$SCRIPT_DIR/venv/bin/python" "$SCRIPT_DIR/server.py" "$@"

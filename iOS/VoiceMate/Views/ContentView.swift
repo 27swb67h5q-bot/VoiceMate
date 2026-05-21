@@ -357,7 +357,7 @@ struct ContentView: View {
                     if let emotion = r.emotion { showEmotion = emotion }
                 }
                 if let url = voiceService.audioURL(for: r.audioUrl) {
-                    try? await voiceService.playAudio(from: url)
+                    try? await voiceService.playAudio(from: url, remotePath: r.audioUrl)
                 }
             } catch {
                 // WebSocket failed - fall back to REST API
@@ -374,7 +374,7 @@ struct ContentView: View {
                         saveMessages()
                     }
                     if let url = voiceService.audioURL(for: fallback.audioUrl) {
-                        try? await voiceService.playAudio(from: url)
+                        try? await voiceService.playAudio(from: url, remotePath: fallback.audioUrl)
                     }
                 }
             }
@@ -406,7 +406,7 @@ struct ContentView: View {
                 if let emotion = r.emotion { showEmotion = emotion }
             }
             if let url = voiceService.audioURL(for: r.audioUrl) {
-                try? await voiceService.playAudio(from: url)
+                try? await voiceService.playAudio(from: url, remotePath: r.audioUrl)
             }
         } catch {
             await MainActor.run { streamingMessageId = nil }
@@ -522,7 +522,7 @@ struct MessageBubble: View {
         isPlaying = true
         if let url = voiceService.audioURL(for: path) {
             Task {
-                try? await voiceService.playAudio(from: url)
+                try? await voiceService.playAudio(from: url, remotePath: path)
                 try? await Task.sleep(nanoseconds: UInt64(message.duration * 1_000_000_000))
                 await MainActor.run { isPlaying = false }
             }
