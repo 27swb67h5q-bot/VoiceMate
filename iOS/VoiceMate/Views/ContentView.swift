@@ -728,17 +728,24 @@ struct MessageBubble: View {
     
     private func playAudio(_ path: String) {
         guard !path.isEmpty else { return }
-        isPlaying = true
-        if let url = voiceService.audioURL(for: path) {
-            Task {
-                do {
-                    try await voiceService.playAudio(from: url, remotePath: path)
-                    try await Task.sleep(nanoseconds: UInt64(message.duration * 1_000_000_000))
-                } catch { }
-                await MainActor.run { isPlaying = false }
-            }
-        } else {
+        if isPlaying {
+            // Stop playback
+            voiceService.stopAudio()
             isPlaying = false
+        } else {
+            // Start playback
+            isPlaying = true
+            if let url = voiceService.audioURL(for: path) {
+                Task {
+                    do {
+                        try await voiceService.playAudio(from: url, remotePath: path)
+                        try await Task.sleep(nanoseconds: UInt64(message.duration * 1_000_000_000))
+                    } catch { }
+                    await MainActor.run { isPlaying = false }
+                }
+            } else {
+                isPlaying = false
+            }
         }
     }
 }

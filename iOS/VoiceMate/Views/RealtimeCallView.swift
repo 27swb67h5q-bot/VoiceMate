@@ -174,10 +174,12 @@ struct RealtimeCallView: View {
         .background(Color.black.opacity(0.9))
         .ignoresSafeArea()
         .onAppear {
+            UIApplication.shared.isIdleTimerDisabled = true
             startPulsing()
             callService.startCall()
         }
         .onDisappear {
+            UIApplication.shared.isIdleTimerDisabled = false
             callService.endCall()
         }
         .onChange(of: callService.isCallActive) { active in

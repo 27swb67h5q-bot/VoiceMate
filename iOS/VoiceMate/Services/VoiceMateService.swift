@@ -122,7 +122,12 @@ class VoiceMateService: ObservableObject {
             self.audioPlayer?.play()
         }
     }
-    
+
+    func stopAudio() {
+        audioPlayer?.stop()
+        audioPlayer = nil
+    }
+
     /// Send message via WebSocket streaming (token by token)
     func sendMessageStream(text: String, conversationId: String?) async throws -> ChatResponse {
         // Retry loop: try WebSocket up to 2 times, then fall back to REST
