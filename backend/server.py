@@ -411,7 +411,7 @@ class TTSEngine:
         self.chattts = ChatTTSEngine()
         self.volc = VolcengineTTS()
 
-    async def synthesize(
+    async def _synthesize_edge_tts(
         self,
         text: str,
         emotion: str = "gentle",
@@ -421,27 +421,7 @@ class TTSEngine:
         pitch: Optional[str] = None,
         volume: Optional[str] = None,
     ) -> tuple[str, int]:
-        """Convert text to speech with emotion, return (audio_path, duration_ms).
-        
-        Priority: ChatTTS (local GPU) → Volcengine (cloud API) → edge_tts (fallback)
-        """
-        # 1) ChatTTS (local GPU, most natural)
-        try:
-            return await self.chattts.synthesize(text, emotion=emotion, speed_ratio=speed_ratio)
-        except Exception as e:
-            logger.warning(f"ChatTTS failed, falling back: {e}")
-
-        # 2) Volcengine if configured
-        if self.volc.appid and self.volc.token:
-            try:
-                path = await self.volc.synthesize(text, emotion=emotion, speed_ratio=speed_ratio)
-                duration_ms = max(int((len(text) / 5) * 1000), 1000)
-                logger.info(f"Volcengine TTS generated [{emotion}] -> {path} ({duration_ms}ms)")
-                return path, duration_ms
-            except Exception as e:
-                logger.warning(f"Volcengine TTS failed, falling back to edge-tts: {e}")
-
-        # 3) edge_tts fallback
+        """Synthesize speech using edge_tts with the given voice and parameters."""
         import edge_tts
 
         audio_id = str(uuid.uuid4())[:8]
@@ -518,6 +498,48 @@ class TTSEngine:
 
         logger.info(f"TTS generated [{emotion}] in {elapsed:.2f}s -> {output_path} ({duration_ms}ms)")
         return output_path, duration_ms
+
+
+    async def synthesize(
+        self,
+        text: str,
+        emotion: str = "gentle",
+        speed_ratio: Optional[float] = None,
+        voice: Optional[str] = None,
+        rate: Optional[str] = None,
+        pitch: Optional[str] = None,
+        volume: Optional[str] = None,
+    ) -> tuple[str, int]:
+        """Convert text to speech with emotion, return (audio_path, duration_ms).
+        
+        Priority:
+          - If voice is explicitly specified → edge_tts directly (ChatTTS/Volcengine don't respect user's voice choice)
+          - If no voice specified → ChatTTS (local GPU) → Volcengine (cloud API) → edge_tts (default voice)
+
+        """
+        # If user explicitly chose a voice, use edge_tts directly
+        # (ChatTTS and Volcengine have their own internal voices and ignore the user's selection)
+        if voice is not None:
+            return await self._synthesize_edge_tts(text, emotion, speed_ratio, voice, rate, pitch, volume)
+
+        # 1) ChatTTS (local GPU, most natural)
+        try:
+            return await self.chattts.synthesize(text, emotion=emotion, speed_ratio=speed_ratio)
+        except Exception as e:
+            logger.warning(f"ChatTTS failed, falling back: {e}")
+
+        # 2) Volcengine if configured
+        if self.volc.appid and self.volc.token:
+            try:
+                path = await self.volc.synthesize(text, emotion=emotion, speed_ratio=speed_ratio)
+                duration_ms = max(int((len(text) / 5) * 1000), 1000)
+                logger.info(f"Volcengine TTS generated [{emotion}] -> {path} ({duration_ms}ms)")
+                return path, duration_ms
+            except Exception as e:
+                logger.warning(f"Volcengine TTS failed, falling back to edge-tts: {e}")
+
+        # 3) edge_tts fallback
+        return await self._synthesize_edge_tts(text, emotion, speed_ratio, voice, rate, pitch, volume)
 
 # ── Initialize Services ─────────────────────────────────────────────────────
 
