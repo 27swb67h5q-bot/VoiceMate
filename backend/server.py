@@ -907,65 +907,122 @@ async def voice_chat(
     }
 
 
+
+class WSConnectionState:
+    """Tracks per-connection state to prevent concurrent request handling."""
+    def __init__(self):
+        self.lock = asyncio.Lock()
+        self._processing = False
+
+    @property
+    def is_processing(self) -> bool:
+        return self._processing
+
+    @is_processing.setter
+    def is_processing(self, value: bool):
+        self._processing = value
+
+
+_ws_connections: dict[WebSocket, WSConnectionState] = {}
+
+
 # ── WebSocket for Streaming Chat ────────────────────────────────────────────
 
 @app.websocket("/v1/ws/chat")
 async def ws_chat(websocket: WebSocket):
+    state = WSConnectionState()
+    _ws_connections[websocket] = state
     await websocket.accept()
-    try:
-        data = await websocket.receive_json()
-        text = data.get("text", "").strip()
-        conv_id = data.get("conversation_id") or str(uuid.uuid4())
-        voice_name = data.get("voice")
-        persona = data.get("persona") or DEFAULT_PERSONA
+    logger.info(f"WS client connected: {websocket.client}")
 
-        if not text:
-            await websocket.send_json({"type": "error", "message": "Text cannot be empty"})
-            await websocket.close()
+    async def heartbeat(interval: float = 25.0):
+        """Send ping every  seconds while the connection is alive."""
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                try:
+                    await websocket.send_json({"type": "ping"})
+                except Exception:
+                    break
+        except asyncio.CancelledError:
+            pass
+
+    heartbeat_task = asyncio.create_task(heartbeat())
+    try:
+        try:
+            data = await asyncio.wait_for(
+                websocket.receive_json(),
+                timeout=30.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"WS timeout: no message from {websocket.client} within 30s")
+            await websocket.send_json({"type": "error", "message": "Request timed out: no message received within 30 seconds"})
+            await websocket.close(code=1008)
             return
 
-        logger.info(f"WS chat [{conv_id}]: {text[:60]}")
+        if state.is_processing:
+            logger.warning(f"WS concurrency violation: {websocket.client} sent multiple requests")
+            await websocket.send_json({"type": "error", "message": "Only one request at a time per connection"})
+            return
 
-        # Load history
-        conv_history = history.load(conv_id)
+        async with state.lock:
+            state.is_processing = True
 
-        # Stream DeepSeek tokens
-        full_reply = ""
-        async for token in deepseek.stream_chat(text, conv_history, persona=persona):
-            full_reply += token
-            await websocket.send_json({"type": "token", "content": token})
+            text = data.get("text", "").strip()
+            conv_id = data.get("conversation_id") or str(uuid.uuid4())
+            voice_name = data.get("voice")
+            persona = data.get("persona") or DEFAULT_PERSONA
 
-        # Strip markdown before TTS and history storage
-        clean_reply = strip_markdown(full_reply)
-        clean_reply = naturalize_text(clean_reply)
+            if not text:
+                await websocket.send_json({"type": "error", "message": "Text cannot be empty"})
+                await websocket.close()
+                return
 
-        # Save history
-        history.append(conv_id, text, clean_reply)
+            logger.info(f"WS chat [{conv_id}]: {text[:60]}")
 
-        # Generate TTS
-        audio_path, duration_ms = await tts.synthesize(clean_reply, voice=voice_name)
-        audio_url = f"/v1/audio/{os.path.basename(audio_path)}"
+            # Load history
+            conv_history = history.load(conv_id)
 
-        await websocket.send_json({
-            "type": "done",
-            "audio_url": audio_url,
-            "conversation_id": conv_id,
-            "duration_ms": duration_ms,
-            "full_text": clean_reply,
-        })
+            # Stream DeepSeek tokens
+            full_reply = ""
+            async for token in deepseek.stream_chat(text, conv_history, persona=persona):
+                full_reply += token
+                await websocket.send_json({"type": "token", "content": token})
+
+            # Strip markdown before TTS and history storage
+            clean_reply = strip_markdown(full_reply)
+            clean_reply = naturalize_text(clean_reply)
+
+            # Save history
+            history.append(conv_id, text, clean_reply)
+
+            # Generate TTS
+            audio_path, duration_ms = await tts.synthesize(clean_reply, voice=voice_name)
+            audio_url = f"/v1/audio/{os.path.basename(audio_path)}"
+
+            await websocket.send_json({
+                "type": "done",
+                "audio_url": audio_url,
+                "conversation_id": conv_id,
+                "duration_ms": duration_ms,
+                "full_text": clean_reply,
+            })
     except WebSocketDisconnect:
-        logger.info("WS client disconnected")
+        logger.info(f"WS client disconnected: {websocket.client}")
     except Exception as e:
-        logger.error(f"WS error: {e}")
+        logger.exception(f"WS error [{type(e).__name__}]: {e}")
         try:
             await websocket.send_json({"type": "error", "message": str(e)})
         except:
             pass
     finally:
+        heartbeat_task.cancel()
+        _ws_connections.pop(websocket, None)
         try:
             await websocket.close()
         except:
             pass
+        logger.info(f"WS connection cleaned up: {websocket.client}")
 
 
 # ── Placeholder for Phase 2: real-time voice conversation

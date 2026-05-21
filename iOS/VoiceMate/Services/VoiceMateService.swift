@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import os.log
 
 /// Service that communicates with the VoiceMate backend
 class VoiceMateService: ObservableObject {
@@ -32,6 +33,7 @@ class VoiceMateService: ObservableObject {
     private let session: URLSession
     @Published var streamingText: String = ""
     private var wsTask: URLSessionWebSocketTask?
+    private let logger = Logger(subsystem: "com.voicemate", category: "WebSocket")
     
     init() {
         // Initialize session first (required before accessing any @Published properties)
@@ -123,92 +125,197 @@ class VoiceMateService: ObservableObject {
     
     /// Send message via WebSocket streaming (token by token)
     func sendMessageStream(text: String, conversationId: String?) async throws -> ChatResponse {
-        await MainActor.run {
-            isProcessing = true
-            streamingText = ""
-        }
-        defer { Task { @MainActor in isProcessing = false } }
+        // Retry loop: try WebSocket up to 2 times, then fall back to REST
+        let maxRetries = 2
         
-        let wsURL = URL(string: "ws://\(serverHost):\(serverPort)/v1/ws/chat")!
-        let task = session.webSocketTask(with: wsURL)
-        self.wsTask = task
-        task.resume()
-        
-        var req: [String: Any] = ["text": text, "voice": selectedVoice, "persona": selectedPersona, "speed": speechSpeed]
-        if let cid = conversationId { req["conversation_id"] = cid }
-        let reqData = try JSONSerialization.data(withJSONObject: req)
-        try await task.send(URLSessionWebSocketTask.Message.data(reqData))
-        
-        var fullText = ""
-        var audioUrl = ""
-        var resultConvId = conversationId ?? ""
-        var durationMs = 0
-        
-        while true {
-            let message: URLSessionWebSocketTask.Message
+    wsRetryLoop:
+        for attempt in 0..<maxRetries {
+            await MainActor.run {
+                isProcessing = true
+                streamingText = ""
+            }
+            
+            let wsURL = URL(string: "ws://\(serverHost):\(serverPort)/v1/ws/chat")!
+            let task = session.webSocketTask(with: wsURL)
+            self.wsTask = task
+            task.resume()
+            
+            var req: [String: Any] = ["text": text, "voice": selectedVoice, "persona": selectedPersona, "speed": speechSpeed]
+            if let cid = conversationId { req["conversation_id"] = cid }
+            let reqData = try JSONSerialization.data(withJSONObject: req)
+            
             do {
-                message = try await task.receive()
+                try await task.send(URLSessionWebSocketTask.Message.data(reqData))
             } catch {
-                // WebSocket connection closed or failed
+                // Send failed — retry or fall back
                 self.wsTask = nil
-                throw error
+                if attempt < maxRetries - 1 {
+                    print("[VoiceMate] WS send failed (attempt \(attempt+1)/\(maxRetries)), retrying...")
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)  // 1s delay before retry
+                    continue wsRetryLoop
+                }
+                // Last attempt failed — fall back to REST
+                print("[VoiceMate] WS send failed after \(maxRetries) attempts, falling back to REST")
+                defer { Task { @MainActor in isProcessing = false } }
+                return try await restChat(text: text, conversationId: conversationId)
             }
             
-            let json: [String: Any]
-            switch message {
-            case .data(let data):
-                guard let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                    continue
+            var fullText = ""
+            var audioUrl = ""
+            var resultConvId = conversationId ?? ""
+            var durationMs = 0
+            var receivedDone = false
+            
+            // Start a heartbeat timer to ping the connection status
+            let heartbeatTask = Task {
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 15_000_000_000)  // 15s interval
+                    if task.state == .cancelled || task.state == .completed { break }
+                    // Send a lightweight ping by checking the connection
+                    task.sendPing { _ in }
                 }
-                json = parsed
-            case .string(let string):
-                guard let data = string.data(using: .utf8),
-                      let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                    continue
-                }
-                json = parsed
-            @unknown default:
-                continue
             }
             
-            guard let type = json["type"] as? String else { continue }
+            defer {
+                heartbeatTask.cancel()
+            }
             
-            switch type {
-            case "token":
-                if let content = json["content"] as? String {
-                    fullText += content
-                    let text = fullText
-                    await MainActor.run { self.streamingText = text }
+            while !receivedDone {
+                let message: URLSessionWebSocketTask.Message
+                do {
+                    // Race receive() against a 30s timeout
+                    let wrappedReceive = Task { () -> URLSessionWebSocketTask.Message in
+                        try await task.receive()
+                    }
+                    let wrappedTimeout = Task { () throws -> URLSessionWebSocketTask.Message in
+                        try await Task.sleep(nanoseconds: 30_000_000_000)
+                        wrappedReceive.cancel()
+                        throw VoiceMateError.serverError(statusCode: 0, body: "WebSocket receive timed out")
+                    }
+                    
+                    message = try await wrappedReceive.value
+                    wrappedTimeout.cancel()
+                    
+                } catch {
+                    self.wsTask = nil
+                    if error is CancellationError {
+                        // Receive timed out after 30s — retry if attempts remain
+                        if attempt < maxRetries - 1 {
+                            print("[VoiceMate] WS receive timed out (attempt \(attempt+1)/\(maxRetries)), reconnecting...")
+                            try? await Task.sleep(nanoseconds: 1_000_000_000)
+                            continue wsRetryLoop
+                        }
+                        throw error
+                    }
+                    // Connection lost — retry or fall back
+                    if attempt < maxRetries - 1 {
+                        print("[VoiceMate] WS connection lost (attempt \(attempt+1)/\(maxRetries)), reconnecting...")
+                        try? await Task.sleep(nanoseconds: 1_000_000_000)
+                        continue wsRetryLoop
+                    }
+                    // All retries exhausted — fall back to REST
+                    print("[VoiceMate] WS failed after \(maxRetries) attempts, falling back to REST")
+                    defer { Task { @MainActor in isProcessing = false } }
+                    return try await restChat(text: text, conversationId: conversationId)
                 }
-            case "done":
-                audioUrl = json["audio_url"] as? String ?? ""
-                resultConvId = json["conversation_id"] as? String ?? resultConvId
-                durationMs = json["duration_ms"] as? Int ?? 0
-                let emotion = json["emotion"] as? String
-                // Prefer full_text if available (string messages), otherwise use accumulated fullText
-                if let finalText = json["full_text"] as? String {
-                    fullText = finalText
+                
+                let json: [String: Any]
+                switch message {
+                case .data(let data):
+                    guard let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                        continue
+                    }
+                    json = parsed
+                case .string(let string):
+                    guard let data = string.data(using: .utf8),
+                          let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                        continue
+                    }
+                    json = parsed
+                @unknown default:
+                    continue
                 }
-                task.cancel(with: .normalClosure, reason: nil)
-                self.wsTask = nil
-                return ChatResponse(
-                    replyText: fullText,
-                    audioUrl: audioUrl,
-                    conversationId: resultConvId,
-                    durationMs: durationMs,
-                    emotion: emotion
-                )
-            case "error":
-                task.cancel(with: .normalClosure, reason: nil)
-                self.wsTask = nil
-                throw VoiceMateError.serverError(
-                    statusCode: 0,
-                    body: json["message"] as? String ?? "WebSocket error"
-                )
-            default:
-                break
+                
+                guard let type = json["type"] as? String else { continue }
+                
+                switch type {
+                case "token":
+                    if let content = json["content"] as? String {
+                        fullText += content
+                        let text = fullText
+                        await MainActor.run { self.streamingText = text }
+                    }
+                case "ping":
+                    // Server-side keepalive, nothing to do
+                    break
+                case "done":
+                    audioUrl = json["audio_url"] as? String ?? ""
+                    resultConvId = json["conversation_id"] as? String ?? resultConvId
+                    durationMs = json["duration_ms"] as? Int ?? 0
+                    let emotion = json["emotion"] as? String
+                    if let finalText = json["full_text"] as? String {
+                        fullText = finalText
+                    }
+                    task.cancel(with: .normalClosure, reason: nil)
+                    self.wsTask = nil
+                    receivedDone = true
+                    await MainActor.run { self.isProcessing = false }
+                    return ChatResponse(
+                        replyText: fullText,
+                        audioUrl: audioUrl,
+                        conversationId: resultConvId,
+                        durationMs: durationMs,
+                        emotion: emotion
+                    )
+                case "error":
+                    task.cancel(with: .normalClosure, reason: nil)
+                    self.wsTask = nil
+                    await MainActor.run { self.isProcessing = false }
+                    throw VoiceMateError.serverError(
+                        statusCode: 0,
+                        body: json["message"] as? String ?? "WebSocket error"
+                    )
+                default:
+                    break
+                }
             }
         }
+        
+        // Fallback: call REST API
+        print("[VoiceMate] WS streaming unavailable, using REST fallback")
+        defer { Task { @MainActor in isProcessing = false } }
+        return try await restChat(text: text, conversationId: conversationId)
+    }
+    
+    /// Fallback: send message via REST API when WebSocket is unavailable
+    private func restChat(text: String, conversationId: String?) async throws -> ChatResponse {
+        let url = URL(string: "http://\(serverHost):\(serverPort)/v1/chat")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        let body = ChatRequest(
+            text: text,
+            conversationId: conversationId,
+            voice: selectedVoice,
+            persona: selectedPersona,
+            speed: speechSpeed
+        )
+        request.httpBody = try JSONEncoder().encode(body)
+        
+        let (data, response) = try await session.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw VoiceMateError.invalidResponse
+        }
+        
+        guard httpResponse.statusCode == 200 else {
+            let body = String(data: data, encoding: .utf8) ?? "unknown"
+            throw VoiceMateError.serverError(statusCode: httpResponse.statusCode, body: body)
+        }
+        
+        let chatResponse = try JSONDecoder().decode(ChatResponse.self, from: data)
+        return chatResponse
     }
     
     /// Health check
