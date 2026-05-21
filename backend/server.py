@@ -697,7 +697,7 @@ deepseek = DeepSeekClient()
 tts = TTSEngine()
 history = HistoryManager()
 # Load cloned voices database
-_load_clone_db()
+# _load_clone_db() — moved to after function definition
 
 
 # In-memory conversation store (simple for MVP, will persist later)
@@ -1150,6 +1150,9 @@ def _load_clone_db():
         except Exception as e:
             logger.error(f"Failed to load clone DB: {e}")
 
+
+# Initialize clone DB
+_load_clone_db()
 
 
 # ── Real-Time Voice Conversation Helpers ──────────────────────────────────────
