@@ -172,9 +172,10 @@ struct VoiceCloneView: View {
     
     private func refreshCloneStatus() {
         guard !storedCloneVoiceId.isEmpty else { return }
+        let voiceId = storedCloneVoiceId
         Task {
             do {
-                let status = try await voiceService.checkCloneStatus(voiceId: storedCloneVoiceId.wrappedValue)
+                let status = try await voiceService.checkCloneStatus(voiceId: voiceId)
                 await MainActor.run {
                     cloneStatus = status.status
                 }
@@ -266,6 +267,7 @@ struct VoiceCloneView: View {
     
     private func pollCloneStatus() {
         guard !storedCloneVoiceId.isEmpty else { return }
+        let voiceId = storedCloneVoiceId
         
         Task {
             var retries = 0
@@ -273,7 +275,7 @@ struct VoiceCloneView: View {
             
             while retries < maxRetries {
                 do {
-                    let status = try await voiceService.checkCloneStatus(voiceId: storedCloneVoiceId.wrappedValue)
+                    let status = try await voiceService.checkCloneStatus(voiceId: voiceId)
                     await MainActor.run {
                         cloneStatus = status.status
                     }

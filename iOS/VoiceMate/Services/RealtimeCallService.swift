@@ -381,7 +381,7 @@ class RealtimeCallService: NSObject, ObservableObject {
         let inputNode = audioEngine.inputNode
         self.inputNode = inputNode
         
-        recognitionTask = speechRecognizer.recognitionTask(with: recognitionRequest) { [weak self] result, error in
+        recognitionTask = speechRecognizer.recognitionTask(with: recognitionRequest) { [weak self] (result: SFSpeechRecognitionResult?, error: Error?) in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 
