@@ -19,6 +19,10 @@ struct ContentView: View {
     @State private var showEmotion: String? = nil
     @State private var emotionMessageId: UUID? = nil
     
+    // Keyboard handling
+    @FocusState private var isTextFieldFocused: Bool
+    @State private var keyboardHeight: CGFloat = 0
+    
     // Proactive timer
     @State private var proactiveTimer: Timer? = nil
     @AppStorage("proactive_enabled") private var proactiveEnabled = true
@@ -98,6 +102,10 @@ struct ContentView: View {
     private var messagesList: some View {
         ScrollViewReader { proxy in
             ScrollView {
+                Color.clear
+                    .frame(height: 0)
+                    .id("keyboard_scroll_anchor")
+                
                 LazyVStack(spacing: 4) {
                     if messages.isEmpty {
                         emptyState
@@ -121,6 +129,46 @@ struct ContentView: View {
                 if let last = messages.last {
                     withAnimation {
                         proxy.scrollTo(last.id, anchor: .bottom)
+                    }
+                }
+            }
+            .onChange(of: isTextFieldFocused) { focused in
+                if focused, let last = messages.last {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        withAnimation(.easeOut(duration: 0.25)) {
+                            proxy.scrollTo(last.id, anchor: .bottom)
+                        }
+                    }
+                }
+            }
+            .onChange(of: keyboardHeight) { height in
+                if height > 0, let last = messages.last {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                        withAnimation(.easeOut(duration: 0.25)) {
+                            proxy.scrollTo(last.id, anchor: .bottom)
+                        }
+                    }
+                }
+            }
+            .onAppear {
+                NotificationCenter.default.addObserver(
+                    forName: UIResponder.keyboardWillShowNotification,
+                    object: nil,
+                    queue: .main
+                ) { notification in
+                    if let keyboardFrame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect {
+                        withAnimation(.easeOut(duration: 0.25)) {
+                            keyboardHeight = keyboardFrame.height
+                        }
+                    }
+                }
+                NotificationCenter.default.addObserver(
+                    forName: UIResponder.keyboardWillHideNotification,
+                    object: nil,
+                    queue: .main
+                ) { _ in
+                    withAnimation(.easeOut(duration: 0.25)) {
+                        keyboardHeight = 0
                     }
                 }
             }
@@ -193,6 +241,8 @@ struct ContentView: View {
             .padding(.bottom, 4)
         }
         .background(Color(.systemGray6).opacity(0.95))
+        .padding(.bottom, keyboardHeight)
+        .ignoresSafeArea(.keyboard)
     }
     
     // MARK: - Text Input Area
@@ -201,6 +251,7 @@ struct ContentView: View {
         HStack(spacing: 6) {
             TextField("输入消息...", text: $textInput)
                 .font(.body)
+                .focused($isTextFieldFocused)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
                 .background(Color(.systemGray5))
