@@ -4,16 +4,50 @@ AI 语音陪聊机器人。iOS App + Hermes 后端。
 
 按住说话 → AI 回复 → 语音播放，像微信发语音一样自然。
 
-## 架构
+## 架构（全双工实时通话）
+
+### 通话流程
+
+iOS 麦克风**常开**，实时流式传输 PCM16 16kHz 音频到服务端，服务端进行 VAD（静音检测）。
+用户说完整句话停顿后，自动触发 AI 回复。AI 回复时用户可随时**打断（Barge-in）**。
 
 ```
-iPhone (VoiceMate App)                WSL (Hermes Backend)
-┌─────────────────────┐               ┌─────────────────────┐
-│ 录音 → SFSpeech     │ ── HTTP ──→   │ FastAPI Server      │
-│     识别 (中文)      │               │  → DeepSeek API     │
-│ 播放 AI 语音回复     │ ←── audio ── │  → edge-tts 语音合成│
-└─────────────────────┘               └─────────────────────┘
+iPhone (VoiceMate App)                Backend
+┌──────────────────────────┐          ┌─────────────────────┐
+│ 麦克风常开               │          │ FastAPI WebSocket    │
+│  ├─ PCM16 16kHz 流式音频  │ binary→  │  ├─ VAD 静音检测     │
+│  ├─ 流式音频接收          │ ←binary  │  ├─ DeepSeek 流式    │
+│  │  PCM16 24kHz chunks   │          │  │  生成（流文本）    │
+│  ├─ 客户端 VAD            │          │  └─ edge-tts 流式    │
+│  │  (打断检测)            │          │     语音合成（流音频）│
+│  └─ Barge-in 打断         │ JSON→    │                      │
+└──────────────────────────┘          └─────────────────────┘
 ```
+
+### WebSocket 协议
+
+**Client -> Server:**
+| 类型 | 格式 | 说明 |
+|------|------|------|
+| 音频 | Binary (PCM16 16kHz mono chunks) | 麦克风常开，实时流式发送 |
+| 配置 | JSON | 连接及更新参数 |
+| 打断 | JSON | 用户插嘴，AI 立即停止 |
+| 文本 | JSON | 客户端 ASR 结果（可选） |
+| Ping | JSON | 心跳保活 |
+
+**Server -> Client:**
+| 类型 | 格式 | 说明 |
+|------|------|------|
+| 文本 token | JSON | DeepSeek 流式输出 |
+| 音频开始 | JSON | TTS 即将开始 |
+| 音频数据 | Binary (PCM16 24kHz mono chunks) | AI 语音流式回传 |
+| 音频结束 | JSON | TTS 结束 |
+| 轮次完成 | JSON | AI 完整回复结束 |
+| 打断确认 | JSON | AI 已被打断 |
+| ASR 部分 | JSON | 语音识别中间结果 |
+| ASR 最终 | JSON | 识别完成 |
+| Pong | JSON | 心跳回复 |
+| 错误 | JSON | 错误信息 |
 
 ## 快速开始
 

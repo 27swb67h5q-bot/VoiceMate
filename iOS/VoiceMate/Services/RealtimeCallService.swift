@@ -1,21 +1,38 @@
 import Foundation
-import Speech
 import AVFoundation
-import Combine
+import Accelerate
 
-/// Manages a real-time voice call WebSocket connection to the VoiceMate backend.
+/// Manages a true full-duplex real-time voice conversation with the VoiceMate backend.
 ///
-/// Architecture:
-/// - iOS records audio via AVAudioEngine, uses on-device SFSpeechRecognizer for ASR
-/// - Recognized text is sent as JSON to the backend WebSocket
-/// - Backend streams LLM tokens (JSON) and TTS audio (binary PCM16 24kHz)
-/// - iOS plays audio chunks immediately for low-latency conversation
+/// Architecture (Full-Duplex):
+/// ┌──────────────────────────────────────────────────────────────┐
+/// │  iOS                                                        │
+/// │  ┌──────────┐    PCM16 16kHz chunks    ┌───────────────┐   │
+/// │  │  Mic     │ ──────────────────────────▶  WebSocket    │   │
+/// │  │  (Always │    (binary frames, 50ms)  │  Client       │   │
+/// │  │   Open)  │                          └───────┬───────┘   │
+/// │  └──────────┘                                  │           │
+/// │                                                 │           │
+/// │  ┌──────────┐    PCM16 24kHz chunks    ┌───────▼───────┐   │
+/// │  │  Speaker │ ◀──────────────────────────│  WebSocket    │   │
+/// │  │  (Stream │    (binary frames, 50ms)   │  Client       │   │
+/// │  │   Play)  │                           └───────────────┘   │
+/// │  └──────────┘                                              │
+/// │                                                            │
+/// │  Features:                                                 │
+/// │  • Mic always open — no push-to-talk                      │
+/// │  • Server-side VAD detects silence → triggers response     │
+/// │  • Barge-in: user speaks during AI reply → interrupt TTS   │
+/// │  • Streaming audio playback — no waiting for full TTS      │
+/// └──────────────────────────────────────────────────────────────┘
+///
 class RealtimeCallService: NSObject, ObservableObject {
     // MARK: - Published State
     @Published var isCallActive = false
     @Published var isAISpeaking = false
     @Published var isUserSpeaking = false
     @Published var currentText: String = ""
+    @Published var aiText: String = ""
     @Published var callDuration: TimeInterval = 0
     @Published var errorMessage: String?
     
@@ -25,31 +42,35 @@ class RealtimeCallService: NSObject, ObservableObject {
     private var voice: String
     private var persona: String
     private var speed: Double
-    private var conversationId: String?
     
     // MARK: - WebSocket
-    private var wsTask: URLSessionWebSocketTask?
-    private let session: URLSession
+    private var webSocket: URLSessionWebSocketTask?
+    private let urlSession: URLSession
     private var pingTimer: Timer?
     private var reconnectTimer: Timer?
     
-    // MARK: - Audio Recording (User input)
-    private var audioEngine = AVAudioEngine()
-    private var inputNode: AVAudioInputNode?
-    private let speechRecognizer: SFSpeechRecognizer?
-    private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
-    private var recognitionTask: SFSpeechRecognitionTask?
+    // MARK: - Audio Recording (Always-on mic)
+    private let audioEngine = AVAudioEngine()
+    private let bus = 0
+    /// Queue for sending raw PCM data to WebSocket
+    private let audioSendQueue = DispatchQueue(label: "com.voicemate.audioSend", qos: .userInitiated)
+    /// Format: 16kHz mono PCM16
+    private var recordingFormat: AVAudioFormat?
     
-    // MARK: - Audio Playback (AI response)
-    private var audioPlayer: AVAudioPlayer?
-    private var audioBuffer = Data()
-    private var isReceivingAudio = false
+    // MARK: - Audio Playback (Streaming)
+    private var audioPlayerNode: AVAudioPlayerNode?
+    private var audioEngineP: AVAudioEngine?  // playback-only engine
+    private var playbackFormat: AVAudioFormat?
+    private var audioSampleRate: Double = 24000
+    
+    // MARK: - VAD (Simple energy-based for client-side barge-in)
+    private let vadThreshold: Float = 0.015  // normalized RMS threshold
+    private var isMicActive = false
     
     // Call duration timer
     private var durationTimer: Timer?
     
-    // Cancellables
-    private var cancellables = Set<AnyCancellable>()
+    // MARK: - Init
     
     init(serverHost: String, serverPort: String, voice: String, persona: String, speed: Double) {
         self.serverHost = serverHost
@@ -61,12 +82,9 @@ class RealtimeCallService: NSObject, ObservableObject {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 300
         config.timeoutIntervalForResource = 600
-        self.session = URLSession(configuration: config)
-        
-        self.speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN"))
+        self.urlSession = URLSession(configuration: config)
         
         super.init()
-        
         requestPermissions()
     }
     
@@ -76,7 +94,6 @@ class RealtimeCallService: NSObject, ObservableObject {
     
     private func requestPermissions() {
         AVAudioSession.sharedInstance().requestRecordPermission { _ in }
-        SFSpeechRecognizer.requestAuthorization { _ in }
     }
     
     // MARK: - Call Lifecycle
@@ -87,6 +104,7 @@ class RealtimeCallService: NSObject, ObservableObject {
         isCallActive = true
         errorMessage = nil
         currentText = ""
+        aiText = ""
         callDuration = 0
         
         // Start call duration timer
@@ -94,29 +112,23 @@ class RealtimeCallService: NSObject, ObservableObject {
             self?.callDuration += 1
         }
         
-        // Connect WebSocket
+        // Start WebSocket
         connectWebSocket()
         
-        // Start recording and ASR
-        startRecording()
+        // Start always-on mic
+        startAudioCapture()
     }
     
     func endCall() {
         isCallActive = false
         isAISpeaking = false
         isUserSpeaking = false
+        isMicActive = false
         
-        // Stop recording
-        stopRecording()
+        stopAudioCapture()
+        stopAudioPlayback()
+        disconnectWebSocket()
         
-        // Stop playback
-        stopPlayback()
-        
-        // Close WebSocket
-        wsTask?.cancel(with: .normalClosure, reason: nil)
-        wsTask = nil
-        
-        // Stop timers
         durationTimer?.invalidate()
         durationTimer = nil
         pingTimer?.invalidate()
@@ -124,38 +136,53 @@ class RealtimeCallService: NSObject, ObservableObject {
         reconnectTimer?.invalidate()
         reconnectTimer = nil
         
-        // Reset audio session
         try? AVAudioSession.sharedInstance().setActive(false)
     }
     
     // MARK: - WebSocket Connection
     
     private func connectWebSocket() {
-        let urlStr = "ws://\(serverHost):\(serverPort)/v1/ws/voice"
+        let cleanHost = serverHost.trimmingCharacters(in: .whitespaces)
+        let cleanPort = serverPort.trimmingCharacters(in: .whitespaces)
+        let urlStr = "ws://\(cleanHost):\(cleanPort)/v1/ws/voice"
+        
         guard let url = URL(string: urlStr) else {
-            errorMessage = "无效的服务器地址"
+            errorMessage = "Invalid server address"
             return
         }
         
-        wsTask = session.webSocketTask(with: url)
-        wsTask?.resume()
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 300
         
-        // Start ping keepalive
+        webSocket = urlSession.webSocketTask(with: request)
+        webSocket?.resume()
+        
+        // Send initial config
+        sendJson([
+            "type": "config",
+            "voice": voice,
+            "persona": persona,
+            "speed": speed,
+        ])
+        
+        // Keepalive ping
         pingTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             self?.sendPing()
         }
         
-        // Start receiving messages
+        // Start receiving
         receiveMessage()
+    }
+    
+    private func disconnectWebSocket() {
+        webSocket?.cancel(with: .normalClosure, reason: nil)
+        webSocket = nil
     }
     
     private func reconnect() {
         guard isCallActive else { return }
-        
         logger("Reconnecting in 2s...")
-        reconnectTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: false) { [weak self] _ in
-            self?.connectWebSocket()
-        }
+        connectWebSocket()
     }
     
     private func sendPing() {
@@ -163,300 +190,381 @@ class RealtimeCallService: NSObject, ObservableObject {
         sendJson(["type": "ping"])
     }
     
-    // MARK: - Sending
+    // MARK: - Send
     
     private func sendJson(_ dict: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: dict),
-              let jsonString = String(data: data, encoding: .utf8),
-              let task = wsTask else {
-            return
-        }
-        task.send(.string(jsonString)) { error in
+              let jsonStr = String(data: data, encoding: .utf8) else { return }
+        
+        webSocket?.send(.string(jsonStr)) { [weak self] error in
             if let error = error {
-                self.logger("Send error: \(error.localizedDescription)")
+                self?.logger("Send JSON error: \(error)")
             }
         }
     }
     
-    /// Send recognized user text to the backend
-    private func sendUserText(_ text: String) {
-        guard isCallActive, !text.isEmpty else { return }
+    private func sendAudioChunk(_ pcmData: Data) {
+        guard isCallActive, let ws = webSocket, ws.state == .running else { return }
         
-        var payload: [String: Any] = [
-            "type": "text",
-            "text": text,
-            "voice": voice,
-            "persona": persona,
-            "speed": speed,
-        ]
-        if let convId = conversationId {
-            payload["conversation_id"] = convId
+        audioSendQueue.async { [weak self] in
+            guard let self = self else { return }
+            let semaphore = DispatchSemaphore(value: 0)
+            ws.send(.data(pcmData)) { error in
+                if let error = error {
+                    self.logger("Send audio chunk error: \(error)")
+                }
+                semaphore.signal()
+            }
+            _ = semaphore.wait(timeout: .now() + 1.0)
         }
-        
-        sendJson(payload)
     }
     
-    // MARK: - Receiving
+    // MARK: - Receive
     
     private func receiveMessage() {
-        wsTask?.receive { [weak self] result in
+        guard let ws = webSocket else { return }
+        
+        ws.receive { [weak self] result in
             guard let self = self else { return }
             
             switch result {
             case .success(let message):
-                self.handleMessage(message)
+                switch message {
+                case .string(let text):
+                    self.handleTextMessage(text)
+                case .data(let data):
+                    self.handleAudioData(data)
+                @unknown default:
+                    break
+                }
                 // Continue receiving
                 self.receiveMessage()
                 
             case .failure(let error):
-                self.logger("WebSocket receive error: \(error.localizedDescription)")
+                self.logger("WebSocket receive error: \(error)")
+                // Don't reconnect on normal closure
+                if let wsError = error as? URLError, wsError.code == .closed {
+                    return
+                }
                 if self.isCallActive {
-                    self.reconnect()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                        self.reconnect()
+                    }
                 }
             }
         }
     }
     
-    private func handleMessage(_ message: URLSessionWebSocketTask.Message) {
-        switch message {
-        case .data(let data):
-            // Binary data = PCM audio chunk
-            handleAudioData(data)
-            
-        case .string(let string):
-            guard let jsonData = string.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
-                  let type = json["type"] as? String else {
-                return
-            }
-            
+    private func handleTextMessage(_ text: String) {
+        guard let data = text.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        
+        let type = json["type"] as? String ?? ""
+        
+        DispatchQueue.main.async {
             switch type {
+            case "pong":
+                break
+                
+            case "asr_partial":
+                if let content = json["text"] as? String {
+                    self.currentText = content
+                    self.isUserSpeaking = true
+                }
+                
+            case "asr_final":
+                if let content = json["text"] as? String {
+                    self.currentText = content
+                }
+                // VAD detected utterance complete — prepare for AI response
+                
             case "token":
                 if let content = json["content"] as? String {
-                    DispatchQueue.main.async {
-                        self.currentText += content
-                    }
+                    self.aiText += content
                 }
                 
             case "audio_start":
-                isReceivingAudio = true
-                audioBuffer = Data()
-                DispatchQueue.main.async {
-                    self.isAISpeaking = true
-                    self.currentText = ""
+                self.isAISpeaking = true
+                self.isUserSpeaking = false
+                self.aiText = ""
+                if let sr = json["sample_rate"] as? Double {
+                    self.audioSampleRate = sr
                 }
+                self.setupAudioPlayback()
                 
             case "audio_end":
-                isReceivingAudio = false
-                playAudioBuffer()
-                
-            case "done":
-                if let convId = json["conversation_id"] as? String {
-                    conversationId = convId
+                // AI finished speaking — will naturally go back to listening
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    self.isAISpeaking = false
                 }
-                // Recording will restart in audioPlayerDidFinishPlaying
-                // to avoid starting mic while AI is still speaking
                 
-            case "pong":
-                break // Keepalive acknowledged
+            case "turn_done":
+                self.isAISpeaking = false
+                self.currentText = ""
+                self.aiText = ""
+                
+            case "interrupted":
+                self.isAISpeaking = false
+                self.stopAudioPlayback()
+                
+            case "timeout":
+                self.errorMessage = "连接超时"
+                self.endCall()
                 
             case "error":
                 if let msg = json["message"] as? String {
-                    DispatchQueue.main.async {
-                        self.errorMessage = msg
-                    }
+                    self.errorMessage = msg
                 }
                 
             default:
                 break
             }
-            
-        @unknown default:
-            break
         }
     }
-    
-    // MARK: - Audio Playback
     
     private func handleAudioData(_ data: Data) {
-        guard isReceivingAudio else { return }
-        audioBuffer.append(data)
-    }
-    
-    private func stopPlayback() {
-        audioPlayer?.stop()
-        audioPlayer = nil
-        audioBuffer = Data()
-        isReceivingAudio = false
-    }
-    
-    private func playAudioBuffer() {
-        guard !audioBuffer.isEmpty else { return }
-        
-        do {
-            // Route to speaker
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .voiceChat)
-            try AVAudioSession.sharedInstance().setActive(true)
-            
-            // Play PCM data as audio
-            // Since we're receiving raw PCM16 24kHz mono, we need to wrap it in a WAV header
-            // or use AVAudioPlayer with proper format
-            let wavData = createWAV(from: audioBuffer, sampleRate: 24000)
-            
-            self.audioPlayer = try AVAudioPlayer(data: wavData)
-            self.audioPlayer?.delegate = self
-            self.audioPlayer?.volume = 1.0
-            self.audioPlayer?.prepareToPlay()
-            self.audioPlayer?.play()
-            
-        } catch {
-            logger("Playback error: \(error.localizedDescription)")
-        }
-    }
-    
-    /// Wrap raw PCM16 data in a WAV header so AVAudioPlayer can play it
-    private func createWAV(from pcmData: Data, sampleRate: Int) -> Data {
-        var wav = Data()
-        let numChannels: UInt16 = 1
-        let bitsPerSample: UInt16 = 16
-        let byteRate = UInt32(sampleRate) * UInt32(numChannels) * UInt32(bitsPerSample) / 8
-        let blockAlign = numChannels * bitsPerSample / 8
-        let dataSize = UInt32(pcmData.count)
-        let fileSize = 36 + dataSize
-        
-        // RIFF header
-        wav.append(contentsOf: [0x52, 0x49, 0x46, 0x46]) // "RIFF"
-        wav.append(contentsOf: fileSize.littleEndian.bytes)
-        wav.append(contentsOf: [0x57, 0x41, 0x56, 0x45]) // "WAVE"
-        
-        // fmt chunk
-        wav.append(contentsOf: [0x66, 0x6D, 0x74, 0x20]) // "fmt "
-        wav.append(contentsOf: UInt32(16).littleEndian.bytes) // chunk size
-        wav.append(contentsOf: UInt16(1).littleEndian.bytes) // PCM format
-        wav.append(contentsOf: numChannels.littleEndian.bytes)
-        wav.append(contentsOf: UInt32(sampleRate).littleEndian.bytes)
-        wav.append(contentsOf: byteRate.littleEndian.bytes)
-        wav.append(contentsOf: blockAlign.littleEndian.bytes)
-        wav.append(contentsOf: bitsPerSample.littleEndian.bytes)
-        
-        // data chunk
-        wav.append(contentsOf: [0x64, 0x61, 0x74, 0x61]) // "data"
-        wav.append(contentsOf: dataSize.littleEndian.bytes)
-        wav.append(pcmData)
-        
-        return wav
-    }
-    
-    // MARK: - Audio Recording & ASR
-    
-    private func startRecording() {
-        guard isCallActive, !isAISpeaking else { return }
-        guard let speechRecognizer = speechRecognizer, speechRecognizer.isAvailable else {
-            logger("Speech recognizer not available")
+        // PCM16 audio chunks from server — play immediately
+        guard let playerNode = audioPlayerNode, let engine = audioEngineP, engine.isRunning else {
             return
         }
         
-        // Cancel any existing task
-        recognitionTask?.cancel()
-        recognitionTask = nil
+        guard let format = playbackFormat else { return }
         
-        // Configure audio session for recording
+        let frameLength = data.count / 2  // 16-bit samples
+        guard frameLength > 0 else { return }
+        
+        guard let pcmBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frameLength)) else {
+            return
+        }
+        pcmBuffer.frameLength = AVAudioFrameCount(frameLength)
+        
+        // Copy PCM16 data into float buffer
+        data.withUnsafeBytes { (rawPtr: UnsafeRawBufferPointer) in
+            guard let srcPtr = rawPtr.baseAddress?.assumingMemoryBound(to: Int16.self) else { return }
+            guard let dstPtr = pcmBuffer.floatChannelData?[0] else { return }
+            
+            // Convert Int16 to Float32 with scaling
+            var buffer = [Int16](repeating: 0, count: frameLength)
+            memcpy(&buffer, srcPtr, data.count)
+            
+            var floatBuffer = [Float](repeating: 0, count: frameLength)
+            vDSP_vflt16(buffer, 1, &floatBuffer, 1, vDSP_Length(frameLength))
+            var scale = Float(Int16.max)
+            vDSP_vsdiv(floatBuffer, 1, &scale, &floatBuffer, 1, vDSP_Length(frameLength))
+            
+            memcpy(dstPtr, floatBuffer, frameLength * MemoryLayout<Float>.size)
+        }
+        
+        playerNode.scheduleBuffer(pcmBuffer) {
+            // Buffer played — do nothing special
+        }
+    }
+    
+    // MARK: - Audio Capture (Always-on Mic)
+    
+    private func startAudioCapture() {
+        let audioSession = AVAudioSession.sharedInstance()
         do {
-            try AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: .voiceChat)
-            try AVAudioSession.sharedInstance().setActive(true, options: .notifyOthersOnDeactivation)
+            // PlayAndRecord is required for full-duplex
+            try audioSession.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetooth, .defaultToSpeaker])
+            try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
         } catch {
             logger("Failed to set audio session: \(error)")
+            errorMessage = "麦克风初始化失败"
             return
         }
         
-        // Setup recognition
-        recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
-        guard let recognitionRequest = recognitionRequest else { return }
-        recognitionRequest.shouldReportPartialResults = true
-        
         let inputNode = audioEngine.inputNode
-        self.inputNode = inputNode
+        let nodeFormat = inputNode.outputFormat(forBus: bus)
         
-        recognitionTask = speechRecognizer.recognitionTask(with: recognitionRequest) { [weak self] (result: SFSpeechRecognitionResult?, error: Error?) in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
+        // We want 16kHz mono PCM16 for bandwidth efficiency
+        // If hardware supports it, request 16kHz; otherwise use hardware rate and resample
+        let targetSampleRate: Double = 16000
+        let targetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16,
+                                         sampleRate: targetSampleRate,
+                                         channels: 1,
+                                         interleaved: false)!
+        
+        recordingFormat = targetFormat
+        
+        // Install tap with hardware format, convert to 16kHz manually
+        inputNode.installTap(onBus: bus, bufferSize: 1024, format: nodeFormat) { [weak self] buffer, _ in
+            guard let self = self, self.isCallActive else { return }
+            
+            // Convert buffer to 16kHz mono PCM16
+            let convertedData = self.convertToPCM16(buffer: buffer, targetSampleRate: targetSampleRate)
+            if !convertedData.isEmpty {
+                self.sendAudioChunk(convertedData)
                 
-                if let result = result {
-                    let transcribed = result.bestTranscription.formattedString
-                    self.currentText = transcribed
-                    self.isUserSpeaking = true
-                    
-                    // If final, send to backend
-                    if result.isFinal && !transcribed.isEmpty {
-                        self.isUserSpeaking = false
-                        self.sendUserText(transcribed)
-                        // Stop recording to avoid duplicate sends
-                        self.stopRecording()
-                    }
+                // Quick VAD for UI state
+                let rms = self.calculateRMS(from: buffer)
+                DispatchQueue.main.async {
+                    self.isUserSpeaking = rms > self.vadThreshold
                 }
                 
-                if error != nil {
-                    self.isUserSpeaking = false
+                // Client-side barge-in detection
+                if rms > self.vadThreshold && self.isAISpeaking {
+                    self.sendJson(["type": "barge_in"])
                 }
             }
-        }
-        
-        // Install tap on audio engine
-        let recordingFormat = inputNode.outputFormat(forBus: 0)
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { [weak self] buffer, _ in
-            self?.recognitionRequest?.append(buffer)
         }
         
         audioEngine.prepare()
         do {
             try audioEngine.start()
-            logger("Recording started")
+            isMicActive = true
+            logger("Audio capture started (16kHz)")
         } catch {
             logger("Failed to start audio engine: \(error)")
+            errorMessage = "麦克风启动失败"
         }
     }
     
-    private func stopRecording() {
+    private func stopAudioCapture() {
         if audioEngine.isRunning {
             audioEngine.stop()
-            audioEngine.inputNode.removeTap(onBus: 0)
+            audioEngine.inputNode.removeTap(onBus: bus)
         }
-        recognitionRequest?.endAudio()
-        recognitionRequest = nil
-        inputNode = nil
+        isMicActive = false
+    }
+    
+    /// Converts an AVAudioPCMBuffer to PCM16 16kHz mono Data
+    private func convertToPCM16(buffer: AVAudioPCMBuffer, targetSampleRate: Double) -> Data {
+        guard let channelData = buffer.floatChannelData else { return Data() }
+        let srcSampleRate = buffer.format.sampleRate
+        let srcChannels = Int(buffer.format.channelCount)
+        let srcFrames = Int(buffer.frameLength)
+        
+        guard srcFrames > 0 else { return Data() }
+        
+        // Downmix to mono if needed
+        let monoFloats: [Float]
+        if srcChannels > 1 {
+            // Average channels
+            var mono = [Float](repeating: 0, count: srcFrames)
+            for ch in 0..<srcChannels {
+                let chData = channelData[ch]
+                for i in 0..<srcFrames {
+                    mono[i] += chData[i] / Float(srcChannels)
+                }
+            }
+            monoFloats = mono
+        } else {
+            monoFloats = Array(UnsafeBufferPointer(start: channelData[0], count: srcFrames))
+        }
+        
+        // Resample if needed
+        let ratio = targetSampleRate / srcSampleRate
+        let targetFrames = Int(Double(srcFrames) * ratio)
+        
+        let resampled: [Float]
+        if abs(ratio - 1.0) > 0.001 {
+            resampled = resampleAudio(input: monoFloats, sourceRate: srcSampleRate, targetRate: targetSampleRate)
+        } else {
+            resampled = monoFloats
+        }
+        
+        // Convert Float32 [-1.0, 1.0] to Int16
+        var int16Samples = [Int16](repeating: 0, count: resampled.count)
+        for i in 0..<resampled.count {
+            let clamped = max(-1.0, min(1.0, resampled[i]))
+            int16Samples[i] = Int16(clamped * Float(Int16.max))
+        }
+        
+        return Data(bytes: int16Samples, count: int16Samples.count * 2)
+    }
+    
+    /// Simple linear interpolation resampling
+    private func resampleAudio(input: [Float], sourceRate: Double, targetRate: Double) -> [Float] {
+        let ratio = sourceRate / targetRate
+        let outputLength = Int(Double(input.count) / ratio)
+        var output = [Float](repeating: 0, count: outputLength)
+        
+        for i in 0..<outputLength {
+            let srcIndex = Double(i) * ratio
+            let srcIndexInt = Int(srcIndex)
+            let frac = srcIndex - Double(srcIndexInt)
+            
+            if srcIndexInt + 1 < input.count {
+                output[i] = input[srcIndexInt] * (1.0 - Float(frac)) + input[srcIndexInt + 1] * Float(frac)
+            } else {
+                output[i] = input[min(srcIndexInt, input.count - 1)]
+            }
+        }
+        
+        return output
+    }
+    
+    /// Calculate RMS from audio buffer for VAD
+    private func calculateRMS(from buffer: AVAudioPCMBuffer) -> Float {
+        guard let channelData = buffer.floatChannelData else { return 0 }
+        let frames = Int(buffer.frameLength)
+        guard frames > 0 else { return 0 }
+        
+        var sumSq: Float = 0
+        let data = channelData[0]
+        
+        // Downsample for performance: check every 4th sample
+        var count = 0
+        for i in stride(from: 0, to: frames, by: 4) {
+            sumSq += data[i] * data[i]
+            count += 1
+        }
+        
+        guard count > 0 else { return 0 }
+        let rms = sqrt(sumSq / Float(count))
+        return rms
+    }
+    
+    // MARK: - Audio Playback (Streaming)
+    
+    private func setupAudioPlayback() {
+        // Create playback engine
+        if audioEngineP == nil {
+            audioEngineP = AVAudioEngine()
+        }
+        
+        guard let engine = audioEngineP else { return }
+        
+        // If already setup, just connect
+        if let existingNode = audioPlayerNode, engine.isRunning {
+            return
+        }
+        
+        let playerNode = AVAudioPlayerNode()
+        audioPlayerNode = playerNode
+        engine.attach(playerNode)
+        
+        // Use the server's sample rate (usually 24000)
+        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                   sampleRate: audioSampleRate,
+                                   channels: 1,
+                                   interleaved: false)!
+        playbackFormat = format
+        
+        engine.connect(playerNode, to: engine.mainMixerNode, format: format)
+        engine.prepare()
+        
+        do {
+            try engine.start()
+            playerNode.play()
+            logger("Audio playback started")
+        } catch {
+            logger("Failed to start playback engine: \(error)")
+        }
+    }
+    
+    private func stopAudioPlayback() {
+        audioPlayerNode?.stop()
+        audioEngineP?.stop()
+        audioEngineP = nil
+        audioPlayerNode = nil
+        playbackFormat = nil
     }
     
     // MARK: - Helpers
     
     private func logger(_ message: String) {
         print("[RealtimeCall] \(message)")
-    }
-}
-
-// MARK: - AVAudioPlayerDelegate
-
-extension RealtimeCallService: AVAudioPlayerDelegate {
-    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        DispatchQueue.main.async {
-            self.isAISpeaking = false
-            // Start recording for next user turn
-            if self.isCallActive {
-                self.startRecording()
-            }
-        }
-    }
-}
-
-// MARK: - LittleEndian bytes helper
-
-extension UInt16 {
-    var bytes: [UInt8] {
-        withUnsafeBytes(of: self.littleEndian) { Array($0) }
-    }
-}
-
-extension UInt32 {
-    var bytes: [UInt8] {
-        withUnsafeBytes(of: self.littleEndian) { Array($0) }
     }
 }

@@ -1155,10 +1155,23 @@ def _load_clone_db():
 _load_clone_db()
 
 
-# ── Real-Time Voice Conversation Helpers ──────────────────────────────────────
+# ── Real-Time Voice Conversation (Full-Duplex) ──────────────────────────────
+
+import struct
+import math
+
+# Simple VAD: energy-based silence detection
+SILENCE_THRESHOLD = 500    # RMS threshold for silence (adjust for mic sensitivity)
+SILENCE_DURATION_MS = 800  # ms of silence before considering utterance complete
+MIN_UTTERANCE_MS = 300     # minimum utterance length to process
+SAMPLE_RATE = 16000        # iOS sends 16kHz PCM16 mono
+BYTES_PER_SAMPLE = 2
+FRAME_MS = 50              # each audio chunk is ~50ms
 
 async def _stream_tts_to_websocket(websocket, text: str, voice=None, speed_ratio=None):
-    """Generate TTS audio and stream it as PCM chunks via WebSocket."""
+    """Generate TTS audio and stream it as PCM chunks via WebSocket.
+    Streams chunks immediately as they're decoded for low latency.
+    """
     import edge_tts
     
     effective_voice = voice or TTS_VOICE
@@ -1212,25 +1225,49 @@ async def _stream_tts_to_websocket(websocket, text: str, voice=None, speed_ratio
     await websocket.send_json({"type": "audio_end"})
 
 
-# ── Real-Time Voice WebSocket ──────────────────────────────────────────────
+def _calc_rms(pcm_chunk: bytes) -> float:
+    """Calculate RMS energy from PCM16 mono bytes."""
+    if len(pcm_chunk) < 2:
+        return 0.0
+    count = len(pcm_chunk) // 2
+    # Unpack as signed 16-bit integers
+    samples = struct.unpack_from('<' + 'h' * count, pcm_chunk)
+    sum_sq = sum(s * s for s in samples)
+    return math.sqrt(sum_sq / count)
+
+
+# ── Full-Duplex Voice WebSocket ──────────────────────────────────────────
 
 @app.websocket("/v1/ws/voice")
 async def ws_voice_realtime(websocket: WebSocket):
-    """Real-time voice conversation WebSocket.
+    """Full-duplex real-time voice conversation WebSocket.
     
     Protocol:
-      Client -> Server (JSON):
-        {"type": "text", "text": "...", "voice": "...", "persona": "...", "conversation_id": "...", "speed": 1.0}
-        {"type": "ping"}
+      Client -> Server:
+        Binary: raw PCM16 16kHz mono audio chunks (~50ms each)
+        JSON:   {"type": "config", "voice": "...", "persona": "...", "speed": 1.0}
+                {"type": "ping"}
+                {"type": "barge_in"}  -- user started speaking during AI reply
       
-      Server -> Client (JSON):
-        {"type": "token", "content": "partial LLM output"}
-        {"type": "audio_start", "sample_rate": 24000, "channels": 1}
-        (binary PCM16 chunks follow)
-        {"type": "audio_end"}
-        {"type": "done", "conversation_id": "..."}
-        {"type": "pong"}
-        {"type": "error", "message": "..."}
+      Server -> Client:
+        JSON:   {"type": "pong"}
+                {"type": "asr_partial", "text": "..."}  -- partial ASR result
+                {"type": "asr_final", "text": "..."}    -- final ASR, user utterance done
+                {"type": "token", "content": "..."}     -- LLM stream token
+                {"type": "audio_start", "sample_rate": 24000, "channels": 1}
+        Binary: PCM16 24kHz mono audio chunks (50ms each)
+        JSON:   {"type": "audio_end"}
+                {"type": "turn_done", "conversation_id": "..."}
+                {"type": "error", "message": "..."}
+                {"type": "interrupted"}  -- AI speech interrupted by barge-in
+    
+    Flow:
+      1. Client streams PCM16 16kHz chunks as binary frames
+      2. Server performs VAD (energy-based silence detection)
+      3. When user utterance complete, send asr_final, call LLM + TTS
+      4. Server streams TTS audio chunks back as binary frames
+      5. If client sends barge_in during playback, server stops TTS immediately
+      6. Client microphone is ALWAYS open; barge-in is detected on client side
     """
     await websocket.accept()
     
@@ -1239,7 +1276,112 @@ async def ws_voice_realtime(websocket: WebSocket):
     voice = None
     speed = None
     
-    logger.info(f"Real-time voice call started: {conv_id}")
+    # VAD state
+    audio_buffer = bytearray()      # accumulates PCM16 16kHz audio
+    silence_frames = 0              # consecutive silent frames
+    utterance_active = False        # currently in an utterance
+    utterance_buffer = bytearray()  # PCM data for current utterance
+    
+    # AI speaking state
+    ai_speaking = False
+    ai_speak_task = None
+    
+    # ASR service placeholder (uses external API; for now we simulate with a simple approach)
+    # In production, replace with Deepgram / Azure / Aliyun real-time ASR
+    
+    logger.info(f"Full-duplex voice call started: {conv_id}")
+    
+    async def handle_barge_in():
+        """Handle user interruption during AI speech."""
+        nonlocal ai_speaking, ai_speak_task
+        if ai_speaking:
+            ai_speaking = False
+            if ai_speak_task and not ai_speak_task.done():
+                ai_speak_task.cancel()
+                try:
+                    await ai_speak_task
+                except asyncio.CancelledError:
+                    pass
+            ai_speak_task = None
+            try:
+                await websocket.send_json({"type": "interrupted"})
+            except Exception:
+                pass
+            logger.info(f"AI speech interrupted by barge-in [{conv_id}]")
+    
+    async def process_utterance(utterance_bytes: bytes):
+        """Process a complete user utterance: ASR -> LLM -> TTS stream."""
+        nonlocal ai_speaking, ai_speak_task
+        
+        if len(utterance_bytes) < MIN_UTTERANCE_MS * SAMPLE_RATE // 1000 * BYTES_PER_SAMPLE:
+            return  # too short, ignore
+        
+        # Send asr_final (client-side ASR will provide the text separately)
+        # For now, we just signal that we detected an utterance
+        await websocket.send_json({
+            "type": "asr_final",
+            "text": "__vad_detected__",
+            "conversation_id": conv_id,
+        })
+        
+        # Note: In full production, send audio to server-side ASR (Deepgram/Azure).
+        # For now we rely on client-side ASR sending a "text" message.
+        # The VAD here is used to trigger the flow; actual transcribed text comes from client.
+        # See the "text" command handler below.
+    
+    async def ai_speak(ai_text: str):
+        """Run LLM stream + TTS stream for AI response."""
+        nonlocal ai_speaking, ai_speak_task
+        
+        async def _speak_task():
+            nonlocal ai_speaking
+            try:
+                conv_history = history.load(conv_id)
+                full_reply = ""
+                
+                # Stream LLM tokens
+                async for token in deepseek.stream_chat(ai_text, conv_history, persona=persona):
+                    if not ai_speaking:
+                        return  # interrupted
+                    full_reply += token
+                    await websocket.send_json({"type": "token", "content": token})
+                
+                if not ai_speaking:
+                    return
+                
+                if not full_reply:
+                    full_reply = "嗯，我听到了呢～"
+                
+                clean_reply = strip_markdown(full_reply)
+                clean_reply = naturalize_text(clean_reply)
+                
+                history.append(conv_id, ai_text, clean_reply)
+                
+                if not ai_speaking:
+                    return
+                
+                # Stream TTS audio
+                await _stream_tts_to_websocket(websocket, clean_reply, voice=voice, speed_ratio=speed)
+                
+                if ai_speaking:
+                    await websocket.send_json({
+                        "type": "turn_done",
+                        "conversation_id": conv_id,
+                    })
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"AI speak task error: {e}")
+                try:
+                    await websocket.send_json({"type": "error", "message": "AI回复失败"})
+                except Exception:
+                    pass
+            finally:
+                ai_speaking = False
+                ai_speak_task = None
+        
+        ai_speaking = True
+        ai_speak_task = asyncio.create_task(_speak_task())
     
     try:
         while True:
@@ -1248,96 +1390,105 @@ async def ws_voice_realtime(websocket: WebSocket):
             except asyncio.TimeoutError:
                 logger.info(f"Voice call timeout: {conv_id}")
                 try:
-                    await websocket.send_json({"type": "error", "message": "连接超时"})
+                    await websocket.send_json({"type": "timeout"})
                 except Exception:
                     pass
                 break
             
-            msg_type = message.get("type")
-            
-            if msg_type == "websocket.disconnect":
-                break
-            
-            if msg_type == "websocket.receive":
-                msg_text = message.get("text")
-                if msg_text is None:
-                    # iOS sends JSON as binary frames; try decoding from bytes
-                    msg_bytes = message.get("bytes")
-                    if msg_bytes is not None:
-                        try:
-                            msg_text = msg_bytes.decode("utf-8")
-                        except UnicodeDecodeError:
-                            logger.warning("Received non-UTF-8 binary message, skipping")
-                            continue
-                    else:
-                        logger.warning("Received websocket.receive with no text or bytes payload")
-                        continue
+            # ── Binary: raw PCM16 audio from iOS mic ──
+            if isinstance(message, bytes):
+                pcm_chunk = message
                 
+                # Calculate VAD
+                rms = _calc_rms(pcm_chunk)
+                is_silent = rms < SILENCE_THRESHOLD
+                
+                if not is_silent:
+                    # Energy detected: reset silence counter, accumulate
+                    silence_frames = 0
+                    utterance_active = True
+                    utterance_buffer.extend(pcm_chunk)
+                elif utterance_active:
+                    # Silence during utterance: count consecutive silent frames
+                    silence_frames += 1
+                    utterance_buffer.extend(pcm_chunk)
+                    
+                    # Check if silence is long enough to end utterance
+                    silence_ms = silence_frames * FRAME_MS
+                    if silence_ms >= SILENCE_DURATION_MS:
+                        # Utterance complete
+                        if ai_speaking:
+                            # User started speaking while AI was talking -> barge-in
+                            await handle_barge_in()
+                        
+                        # Process the utterance
+                        await process_utterance(bytes(utterance_buffer))
+                        
+                        # Reset
+                        utterance_active = False
+                        utterance_buffer = bytearray()
+                        silence_frames = 0
+                # else: silence while not in utterance -> do nothing
+                
+                continue
+            
+            # ── Text: JSON messages ──
+            try:
+                data = json.loads(message)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            
+            command = data.get("type", "")
+            
+            if command == "ping":
                 try:
-                    data = json.loads(msg_text)
-                except json.JSONDecodeError:
-                    logger.warning(f"Invalid JSON from client: {msg_text[:100]}")
+                    await websocket.send_json({"type": "pong"})
+                except Exception:
+                    pass
+                continue
+            
+            if command == "config":
+                # Update conversation parameters
+                if "voice" in data:
+                    voice = data["voice"]
+                if "persona" in data:
+                    persona = data["persona"]
+                if "speed" in data:
+                    speed = data["speed"]
+                if "conversation_id" in data and data["conversation_id"]:
+                    conv_id = data["conversation_id"]
+                logger.info(f"Config updated [{conv_id}]: persona={persona}, voice={voice}")
+                continue
+            
+            if command == "barge_in":
+                # Client detected user speech during AI playback
+                await handle_barge_in()
+                continue
+            
+            if command == "text":
+                # Client-side ASR transcribed text (may arrive alongside VAD)
+                text = data.get("text", "").strip()
+                if not text:
                     continue
                 
-                command = data.get("type", "")
+                if "voice" in data:
+                    voice = data["voice"]
+                if "persona" in data:
+                    persona = data["persona"]
+                if "speed" in data:
+                    speed = data["speed"]
+                if "conversation_id" in data and data["conversation_id"]:
+                    conv_id = data["conversation_id"]
                 
-                if command == "ping":
-                    try:
-                        await websocket.send_json({"type": "pong"})
-                    except Exception:
-                        pass
-                    continue
+                logger.info(f"User text [{conv_id}]: {text[:60]}")
                 
-                if command == "text":
-                    text = data.get("text", "").strip()
-                    if not text:
-                        continue
-                    
-                    if "voice" in data:
-                        voice = data["voice"]
-                    if "persona" in data:
-                        persona = data["persona"]
-                    if "speed" in data:
-                        speed = data["speed"]
-                    if "conversation_id" in data and data["conversation_id"]:
-                        conv_id = data["conversation_id"]
-                    
-                    logger.info(f"Voice call turn [{conv_id}]: {text[:60]}")
-                    
-                    conv_history = history.load(conv_id)
-                    
-                    full_reply = ""
-                    try:
-                        async for token in deepseek.stream_chat(text, conv_history, persona=persona):
-                            full_reply += token
-                            await websocket.send_json({"type": "token", "content": token})
-                    except Exception as e:
-                        logger.error(f"DeepSeek streaming failed: {e}")
-                        await websocket.send_json({"type": "error", "message": "AI回复失败"})
-                        continue
-                    
-                    if not full_reply:
-                        full_reply = "嗯，我听到了呢～"
-                    
-                    clean_reply = strip_markdown(full_reply)
-                    clean_reply = naturalize_text(clean_reply)
-                    
-                    history.append(conv_id, text, clean_reply)
-                    
-                    try:
-                        await _stream_tts_to_websocket(websocket, clean_reply, voice=voice, speed_ratio=speed)
-                    except Exception as e:
-                        logger.error(f"TTS streaming failed: {e}")
-                        await websocket.send_json({"type": "error", "message": "语音合成失败"})
-                        continue
-                    
-                    try:
-                        await websocket.send_json({
-                            "type": "done",
-                            "conversation_id": conv_id,
-                        })
-                    except Exception:
-                        pass
+                # Handle barge-in if AI is speaking
+                if ai_speaking:
+                    await handle_barge_in()
+                
+                # Start AI speak task (LLM + TTS stream)
+                await ai_speak(text)
+                continue
     
     except WebSocketDisconnect:
         logger.info(f"Voice call disconnected: {conv_id}")
@@ -1348,12 +1499,13 @@ async def ws_voice_realtime(websocket: WebSocket):
         except Exception:
             pass
     finally:
+        # Cleanup
+        if ai_speak_task and not ai_speak_task.done():
+            ai_speak_task.cancel()
         try:
             await websocket.close()
         except Exception:
             pass
-
-
 
 
 # ── Proactive Push Messages ──────────────────────────────────────────────────

@@ -1,7 +1,15 @@
 import SwiftUI
 import AVFoundation
 
-/// Real-time call view with pulsing animation and live WebSocket audio streaming.
+/// Full-duplex real-time voice call view.
+///
+/// Shows:
+/// - Pulsating avatar with status indicators
+/// - Live user transcription
+/// - AI streaming text
+/// - Call duration
+/// - End call button
+/// - Waveform visualization for voice activity
 struct RealtimeCallView: View {
     @Environment(\.dismiss) var dismiss
     
@@ -16,7 +24,7 @@ struct RealtimeCallView: View {
     
     @State private var pulseScale: CGFloat = 1.0
     @State private var pulseOpacity: Double = 0.6
-    @State private var audioWaveform: CGFloat = 0.5
+    @State private var showCopied = false
     
     init(serverHost: String, serverPort: String, voice: String, persona: String, speed: Double) {
         self.serverHost = serverHost
@@ -35,7 +43,7 @@ struct RealtimeCallView: View {
     }
     
     var body: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: 20) {
             Spacer()
             
             // Pulsing avatar circle
@@ -67,23 +75,64 @@ struct RealtimeCallView: View {
                             .foregroundColor(.white)
                     )
             }
+            .overlay(
+                // Waveform while user is speaking
+                Group {
+                    if callService.isUserSpeaking {
+                        WaveformView()
+                            .frame(width: 200, height: 40)
+                            .offset(y: 90)
+                    }
+                }
+            )
             
             // Status text
             Text(statusText)
                 .font(.title2)
                 .fontWeight(.semibold)
                 .foregroundColor(.white)
+                .padding(.top, 8)
             
-            // Live transcription
+            // AI streaming text
+            if !callService.aiText.isEmpty {
+                VStack(spacing: 4) {
+                    Text("AI:")
+                        .font(.caption)
+                        .foregroundColor(.green.opacity(0.7))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    
+                    Text(callService.aiText)
+                        .font(.body)
+                        .foregroundColor(.white)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(.horizontal, 32)
+                .padding(.vertical, 12)
+                .background(Color.white.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .padding(.horizontal, 16)
+            }
+            
+            // Live user transcription
             if !callService.currentText.isEmpty {
-                Text(callService.currentText)
-                    .font(.body)
-                    .foregroundColor(.white.opacity(0.9))
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 32)
-                    .padding(.vertical, 8)
-                    .background(Color.white.opacity(0.1))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                VStack(spacing: 4) {
+                    Text("你:")
+                        .font(.caption)
+                        .foregroundColor(.blue.opacity(0.7))
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                    
+                    Text(callService.currentText)
+                        .font(.body)
+                        .foregroundColor(.white.opacity(0.9))
+                        .multilineTextAlignment(.trailing)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+                .padding(.horizontal, 32)
+                .padding(.vertical, 12)
+                .background(Color.white.opacity(0.05))
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .padding(.horizontal, 16)
             }
             
             // Call duration
@@ -113,8 +162,10 @@ struct RealtimeCallView: View {
                         .foregroundColor(.white)
                 }
             }
+            .disabled(!callService.isCallActive)
+            .opacity(callService.isCallActive ? 1.0 : 0.5)
             
-            Text("点击挂断")
+            Text(callService.isCallActive ? "点击挂断" : "通话已结束")
                 .font(.caption)
                 .foregroundColor(.gray.opacity(0.7))
                 .padding(.bottom, 40)
@@ -140,11 +191,11 @@ struct RealtimeCallView: View {
     
     private var statusText: String {
         if callService.isAISpeaking {
-            return "AI 说话中..."
+            return "🎙️ AI 说话中..."
         } else if callService.isUserSpeaking {
-            return "正在听你说话..."
+            return "🎤 正在听你说话..."
         } else if callService.isCallActive {
-            return "实时通话中..."
+            return "💬 实时通话中..."
         } else {
             return "通话结束"
         }
@@ -202,6 +253,27 @@ struct RealtimeCallView: View {
         let minutes = Int(interval) / 60
         let seconds = Int(interval) % 60
         return String(format: "%02d:%02d", minutes, seconds)
+    }
+}
+
+// MARK: - Simple Waveform View
+
+struct WaveformView: View {
+    @State private var animating = false
+    
+    var body: some View {
+        HStack(spacing: 3) {
+            ForEach(0..<20) { i in
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Color.blue.opacity(0.7))
+                    .frame(width: 3, height: animating ? CGFloat.random(in: 8...32) : 8)
+                    .animation(
+                        Animation.easeInOut(duration: 0.3).repeatForever().delay(Double(i) * 0.05),
+                        value: animating
+                    )
+            }
+        }
+        .onAppear { animating = true }
     }
 }
 
