@@ -469,7 +469,9 @@ class TTSEngine:
         # Use local variables only — never mutate instance state
         effective_voice = voice or self.voice
         emotion_params = EMOTION_TTS_PARAMS.get(emotion, {})
-        effective_voice = EMOTION_VOICES.get(emotion, effective_voice)
+        # Only override voice by emotion if caller didn't specify a voice
+        if voice is None:
+            effective_voice = EMOTION_VOICES.get(emotion, effective_voice)
         effective_rate = rate or emotion_params.get("rate", self.rate)
         effective_pitch = pitch or emotion_params.get("pitch", self.pitch)
         effective_volume = volume or self.volume
