@@ -19,6 +19,11 @@ struct ContentView: View {
     @State private var showEmotion: String? = nil
     @State private var emotionMessageId: UUID? = nil
     
+    // Selection mode
+    @State private var isSelecting = false
+    @State private var selectedIds = Set<UUID>()
+
+    
     // Keyboard handling
     @FocusState private var isTextFieldFocused: Bool
     @State private var keyboardHeight: CGFloat = 0
@@ -40,8 +45,12 @@ struct ContentView: View {
                 // Messages area
                 messagesList
                 
-                // Bottom input bar (WeChat style)
-                inputBar
+                // Bottom bar (input or selection mode)
+                if isSelecting {
+                    selectionBottomBar
+                } else {
+                    inputBar
+                }
             }
             .background(Color(.systemGroupedBackground))
             .navigationTitle("妤妤")
@@ -97,6 +106,38 @@ struct ContentView: View {
         .overlay(emotionOverlay)
     }
     
+    // MARK: - Selection Bottom Bar
+    
+    private var selectionBottomBar: some View {
+        VStack(spacing: 0) {
+            Divider().background(Color.gray.opacity(0.3))
+            
+            HStack {
+                Button("取消") {
+                    exitSelectMode()
+                }
+                .foregroundColor(.purple)
+                
+                Spacer()
+                
+                Button("全选") {
+                    selectAll()
+                }
+                .foregroundColor(.purple)
+                
+                Spacer()
+                
+                Button("删除 (\(selectedIds.count))", role: .destructive) {
+                    deleteSelected()
+                }
+                .disabled(selectedIds.isEmpty)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+        }
+        .background(Color(.systemGray6).opacity(0.95))
+    }
+    
     // MARK: - Messages List
     
     private var messagesList: some View {
@@ -111,13 +152,25 @@ struct ContentView: View {
                         emptyState
                     } else {
                         ForEach(messages) { message in
-                            if message.id == streamingMessageId {
-                                MessageBubble(message: message, voiceService: voiceService, streamingText: voiceService.streamingText)
-                                    .id(message.id)
-                            } else {
-                                MessageBubble(message: message, voiceService: voiceService, streamingText: nil)
-                                    .id(message.id)
+                            HStack(spacing: 8) {
+                                if isSelecting {
+                                    Image(systemName: selectedIds.contains(message.id) ? "checkmark.circle.fill" : "circle")
+                                        .foregroundColor(.purple)
+                                        .font(.title3)
+                                        .onTapGesture {
+                                            toggleSelection(message.id)
+                                        }
+                                }
+                                
+                                if message.id == streamingMessageId {
+                                    MessageBubble(message: message, voiceService: voiceService, streamingText: voiceService.streamingText, onDelete: { deleteMessage(message) }, isSelecting: isSelecting, onMultiSelect: { enterSelectMode() })
+                                        .id(message.id)
+                                } else {
+                                    MessageBubble(message: message, voiceService: voiceService, streamingText: nil, onDelete: { deleteMessage(message) }, isSelecting: isSelecting, onMultiSelect: { enterSelectMode() })
+                                        .id(message.id)
+                                }
                             }
+                            .padding(.leading, isSelecting ? 0 : 0)
                         }
                     }
                 }
@@ -511,6 +564,71 @@ struct ContentView: View {
     
     // MARK: - Connection Check
     
+    
+    private func deleteMessage(_ message: ChatMessage) {
+        // Delete cached audio file
+        if let audioPath = message.audioURL {
+            let localURL = AudioCache.localURL(for: audioPath)
+            try? FileManager.default.removeItem(at: localURL)
+        }
+        // Clear streaming state if deleting the currently-streaming message
+        if message.id == streamingMessageId {
+            streamingMessageId = nil
+            voiceService.streamingText = ""
+        }
+        // Remove from array
+        withAnimation {
+            messages.removeAll { $0.id == message.id }
+        }
+        saveMessages()
+    }
+
+    // MARK: - Selection Mode
+    
+    private func enterSelectMode() {
+        isSelecting = true
+        selectedIds = []
+    }
+    
+    private func exitSelectMode() {
+        isSelecting = false
+        selectedIds = []
+    }
+    
+    private func toggleSelection(_ id: UUID) {
+        if selectedIds.contains(id) {
+            selectedIds.remove(id)
+        } else {
+            selectedIds.insert(id)
+        }
+    }
+    
+    private func selectAll() {
+        selectedIds = Set(messages.map { $0.id })
+    }
+    
+    private func deleteSelected() {
+        for message in messages {
+            if selectedIds.contains(message.id) {
+                // Delete cached audio file
+                if let audioPath = message.audioURL {
+                    let localURL = AudioCache.localURL(for: audioPath)
+                    try? FileManager.default.removeItem(at: localURL)
+                }
+                // Clear streaming state if deleting the currently-streaming message
+                if message.id == streamingMessageId {
+                    streamingMessageId = nil
+                    voiceService.streamingText = ""
+                }
+            }
+        }
+        withAnimation {
+            messages.removeAll { selectedIds.contains($0.id) }
+        }
+        saveMessages()
+        exitSelectMode()
+    }
+    
     private func checkConnection() {
         Task {
             let healthy = await voiceService.checkHealth()
@@ -528,6 +646,9 @@ struct MessageBubble: View {
     @State private var isPlaying = false
     let voiceService: VoiceMateService
     let streamingText: String?
+    let onDelete: (() -> Void)?
+    let isSelecting: Bool
+    let onMultiSelect: (() -> Void)?
     
     var body: some View {
         HStack(alignment: .bottom, spacing: 6) {
@@ -567,6 +688,20 @@ struct MessageBubble: View {
             if !message.isUser { Spacer(minLength: 60) }
         }
         .padding(.vertical, 2)
+        .contextMenu {
+            if !isSelecting {
+                Button(role: .destructive) {
+                    onDelete?()
+                } label: {
+                    Label("删除", systemImage: "trash")
+                }
+                Button {
+                    onMultiSelect?()
+                } label: {
+                    Label("多选", systemImage: "checkmark.circle")
+                }
+            }
+        }
     }
     
     private func playAudio(_ path: String) {
