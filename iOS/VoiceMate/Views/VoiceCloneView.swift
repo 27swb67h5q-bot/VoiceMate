@@ -174,7 +174,7 @@ struct VoiceCloneView: View {
         guard !storedCloneVoiceId.isEmpty else { return }
         Task {
             do {
-                let status = try await voiceService.checkCloneStatus(voiceId: storedCloneVoiceId)
+                let status = try await voiceService.checkCloneStatus(voiceId: storedCloneVoiceId.wrappedValue)
                 await MainActor.run {
                     cloneStatus = status.status
                 }
@@ -273,7 +273,7 @@ struct VoiceCloneView: View {
             
             while retries < maxRetries {
                 do {
-                    let status = try await voiceService.checkCloneStatus(voiceId: storedCloneVoiceId)
+                    let status = try await voiceService.checkCloneStatus(voiceId: storedCloneVoiceId.wrappedValue)
                     await MainActor.run {
                         cloneStatus = status.status
                     }

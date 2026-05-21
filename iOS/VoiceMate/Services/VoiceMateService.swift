@@ -170,7 +170,7 @@ class VoiceMateService: ObservableObject {
             let heartbeatTask = Task {
                 while !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 15_000_000_000)  // 15s interval
-                    if task.state == .cancelled || task.state == .completed { break }
+                    if Task.isCancelled { break }
                     // Send a lightweight ping by checking the connection
                     task.sendPing { _ in }
                 }
@@ -328,7 +328,6 @@ class VoiceMateService: ObservableObject {
             return false
         }
     }
-}
     
     // MARK: - Voice Clone API
     
@@ -390,6 +389,8 @@ class VoiceMateService: ObservableObject {
         let wrapper = try JSONDecoder().decode(CloneVoiceListResponse.self, from: data)
         return wrapper.voices
     }
+
+}
 
 // MARK: - Errors
 
