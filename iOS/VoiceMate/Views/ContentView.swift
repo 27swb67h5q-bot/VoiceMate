@@ -619,33 +619,18 @@ struct MessageBubble: View {
             if message.isUser { Spacer(minLength: 60) }
             
             VStack(alignment: message.isUser ? .trailing : .leading, spacing: 4) {
-                // Bubble - show streaming or final text
-                let displayText = streamingText ?? message.text
-                Text(displayText.isEmpty ? "..." : displayText)
-                    .font(.body)
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .background(
-                        RoundedRectangle(cornerRadius: 18)
-                            .fill(message.isUser ? Color.purple : Color(.systemGray3))
-                    )
-                
-                // AI audio play button (hidden during streaming)
-                if !message.isUser, let audioPath = message.audioURL, streamingText == nil {
-                    Button(action: { playAudio(audioPath) }) {
-                        HStack(spacing: 6) {
-                            Image(systemName: isPlaying ? "stop.fill" : "play.fill")
-                                .font(.caption)
-                            Text(isPlaying ? "停止" : "语音 \(Int(message.duration))″")
-                                .font(.caption)
-                        }
-                        .foregroundColor(.purple)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background(Color.purple.opacity(0.1))
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                    }
+                if message.isUser {
+                    // User message -> text bubble (unchanged)
+                    userTextBubble
+                } else if streamingText != nil {
+                    // AI message in streaming state -> show typing text
+                    aiStreamingBubble
+                } else if message.audioURL != nil {
+                    // AI message with audio, not streaming -> voice waveform bubble
+                    aiVoiceBubble
+                } else {
+                    // AI message without audio (proactive, etc.) -> text bubble
+                    aiTextBubble
                 }
             }
             .contentShape(Rectangle())
@@ -663,28 +648,101 @@ struct MessageBubble: View {
                 Button(role: .destructive) {
                     onDelete?()
                 } label: {
-                    Label("删除", systemImage: "trash")
+                    Label("\u{5220}\u{9664}", systemImage: "trash")
                 }
                 Button {
                     onMultiSelect?()
                 } label: {
-                    Label("多选", systemImage: "checkmark.circle")
+                    Label("\u{591A}\u{9009}", systemImage: "checkmark.circle")
                 }
             }
         }
     }
     
+    // MARK: - Bubble Styles
+    
+    /// User text message bubble
+    private var userTextBubble: some View {
+        Text(message.text.isEmpty ? "..." : message.text)
+            .font(.body)
+            .foregroundColor(.white)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 18)
+                    .fill(Color.purple)
+            )
+    }
+    
+    /// AI streaming text bubble (typing effect)
+    private var aiStreamingBubble: some View {
+        let displayText = streamingText ?? message.text
+        return Text(displayText.isEmpty ? "..." : displayText)
+            .font(.body)
+            .foregroundColor(.white)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 18)
+                    .fill(Color(.systemGray3))
+            )
+    }
+    
+    /// AI text bubble (no audio, e.g. proactive messages)
+    private var aiTextBubble: some View {
+        Text(message.text.isEmpty ? "..." : message.text)
+            .font(.body)
+            .foregroundColor(.white)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 18)
+                    .fill(Color(.systemGray3))
+            )
+    }
+    
+    /// AI voice waveform bubble (WeChat style)
+    private var aiVoiceBubble: some View {
+        Button(action: { playAudio(message.audioURL ?? "") }) {
+            HStack(spacing: 8) {
+                // Waveform icon
+                Image(systemName: "waveform")
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundColor(.white)
+                
+                // Duration in seconds (e.g. " 3″")
+                Text(" \(Int(message.duration))″")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(.white.opacity(0.8))
+            }
+            .padding(.leading, 14)
+            .padding(.trailing, 16)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 18)
+                    .fill(Color(.systemGray3))
+            )
+        }
+        .buttonStyle(.plain)
+    }
+    
     private func playAudio(_ path: String) {
+        guard !path.isEmpty else { return }
         isPlaying = true
         if let url = voiceService.audioURL(for: path) {
             Task {
-                try? await voiceService.playAudio(from: url, remotePath: path)
-                try? await Task.sleep(nanoseconds: UInt64(message.duration * 1_000_000_000))
+                do {
+                    try await voiceService.playAudio(from: url, remotePath: path)
+                    try await Task.sleep(nanoseconds: UInt64(message.duration * 1_000_000_000))
+                } catch { }
                 await MainActor.run { isPlaying = false }
             }
+        } else {
+            isPlaying = false
         }
     }
 }
+
 
 // MARK: - Settings View
 
