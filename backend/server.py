@@ -262,7 +262,16 @@ class ChatTTSEngine:
         self.model = None
         self.loaded = False
 
-    async def synthesize(self, text: str, emotion: str = "gentle", speed_ratio: Optional[float] = None) -> tuple[str, int]:
+    async def synthesize(
+        self,
+        text: str,
+        emotion: str = "gentle",
+        speed_ratio: Optional[float] = None,
+        voice: Optional[str] = None,
+        rate: Optional[str] = None,
+        pitch: Optional[str] = None,
+        volume: Optional[str] = None,
+    ) -> tuple[str, int]:
         import ChatTTS, time, uuid
         import soundfile as sf
         import numpy as np
@@ -392,7 +401,16 @@ class TTSEngine:
         self.chattts = ChatTTSEngine()
         self.volc = VolcengineTTS()
 
-    async def synthesize(self, text: str, emotion: str = "gentle", speed_ratio: Optional[float] = None) -> tuple[str, int]:
+    async def synthesize(
+        self,
+        text: str,
+        emotion: str = "gentle",
+        speed_ratio: Optional[float] = None,
+        voice: Optional[str] = None,
+        rate: Optional[str] = None,
+        pitch: Optional[str] = None,
+        volume: Optional[str] = None,
+    ) -> tuple[str, int]:
         """Convert text to speech with emotion, return (audio_path, duration_ms).
         
         Priority: ChatTTS (local GPU) → Volcengine (cloud API) → edge_tts (fallback)
@@ -438,36 +456,26 @@ class TTSEngine:
             "gentle":        {"rate": "+0%",  "pitch": "+0Hz"},
         }
 
-        # Save original state to restore after TTS
-        orig_voice = self.voice
-        orig_rate = self.rate
-        orig_pitch = self.pitch
-        orig_volume = self.volume
-
-        # Apply emotion overrides for this call only
-        self.voice = EMOTION_VOICES.get(emotion, self.voice)
+        # Use local variables only — never mutate instance state
+        effective_voice = voice or self.voice
         emotion_params = EMOTION_TTS_PARAMS.get(emotion, {})
-        self.rate = emotion_params.get("rate", self.rate)
-        self.pitch = emotion_params.get("pitch", self.pitch)
+        effective_voice = EMOTION_VOICES.get(emotion, effective_voice)
+        effective_rate = rate or emotion_params.get("rate", self.rate)
+        effective_pitch = pitch or emotion_params.get("pitch", self.pitch)
+        effective_volume = volume or self.volume
 
 
         communicate = edge_tts.Communicate(
             text,
-            self.voice,
-            rate=self.rate,
-            volume=self.volume,
-            pitch=self.pitch,
+            effective_voice,
+            rate=effective_rate,
+            volume=effective_volume,
+            pitch=effective_pitch,
         )
 
         start = time.time()
         await communicate.save(raw_path)
         elapsed = time.time() - start
-
-        # Restore original state so it doesn't leak between requests
-        self.voice = orig_voice
-        self.rate = orig_rate
-        self.pitch = orig_pitch
-        self.volume = orig_volume
 
         # Rough estimate: edge-tts generates ~50 chars/sec for Chinese
         duration_ms = max(int((len(text) / 5) * 1000), 1000)
@@ -548,9 +556,7 @@ async def chat(request: ChatRequest):
     logger.info(f"Detected emotion: {emotion}")
 
     # 4. Generate TTS audio with emotion and ambient
-    if request.voice:
-        tts.voice = request.voice
-    audio_path, duration_ms = await tts.synthesize(reply, emotion=emotion, speed_ratio=request.speed)
+    audio_path, duration_ms = await tts.synthesize(reply, emotion=emotion, speed_ratio=request.speed, voice=request.voice)
 
     # 3. Store conversation context (for future multi-turn support)
     if conv_id not in conversations:
@@ -696,7 +702,7 @@ async def voice_chat(
     reply = await deepseek.chat(text, conversation_id)
 
     # TTS
-    audio_path, duration_ms = await tts.synthesize(reply)
+    audio_path, duration_ms = await tts.synthesize(reply, voice=None)
 
     conv_id = conversation_id or str(uuid.uuid4())
     audio_filename = os.path.basename(audio_path)
@@ -747,9 +753,7 @@ async def ws_chat(websocket: WebSocket):
         history.append(conv_id, text, clean_reply)
 
         # Generate TTS
-        if voice_name:
-            tts.voice = voice_name
-        audio_path, duration_ms = await tts.synthesize(clean_reply)
+        audio_path, duration_ms = await tts.synthesize(clean_reply, voice=voice_name)
         audio_url = f"/v1/audio/{os.path.basename(audio_path)}"
 
         await websocket.send_json({
