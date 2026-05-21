@@ -162,10 +162,10 @@ struct ContentView: View {
                                 }
                                 
                                 if message.id == streamingMessageId {
-                                    MessageBubble(message: message, voiceService: voiceService, streamingText: voiceService.streamingText, onDelete: { deleteMessage(message) }, isSelecting: isSelecting, onMultiSelect: { enterSelectMode() })
+                                    MessageBubble(message: message, voiceService: voiceService, streamingText: voiceService.streamingText, onDelete: { deleteMessage(message) }, isSelecting: isSelecting, onMultiSelect: { enterSelectMode() }, onSelect: { toggleSelection(message.id) })
                                         .id(message.id)
                                 } else {
-                                    MessageBubble(message: message, voiceService: voiceService, streamingText: nil, onDelete: { deleteMessage(message) }, isSelecting: isSelecting, onMultiSelect: { enterSelectMode() })
+                                    MessageBubble(message: message, voiceService: voiceService, streamingText: nil, onDelete: { deleteMessage(message) }, isSelecting: isSelecting, onMultiSelect: { enterSelectMode() }, onSelect: { toggleSelection(message.id) })
                                         .id(message.id)
                                 }
                             }
@@ -606,6 +606,7 @@ struct MessageBubble: View {
     let onDelete: (() -> Void)?
     let isSelecting: Bool
     let onMultiSelect: (() -> Void)?
+    let onSelect: (() -> Void)?
     
     var body: some View {
         HStack(alignment: .bottom, spacing: 6) {
@@ -639,6 +640,12 @@ struct MessageBubble: View {
                         .background(Color.purple.opacity(0.1))
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
+                }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if isSelecting {
+                    onSelect?()
                 }
             }
             
