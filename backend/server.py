@@ -458,12 +458,12 @@ class TTSEngine:
             "gentle": "zh-CN-XiaoxiaoNeural",
         }
         EMOTION_TTS_PARAMS = {
-            "cheerful":      {"rate": "+15%", "pitch": "+30Hz"},
-            "affectionate":  {"rate": "+5%",  "pitch": "+15Hz"},
-            "sad":           {"rate": "-10%", "pitch": "-20Hz"},
-            "angry":         {"rate": "+5%",  "pitch": "-15Hz"},
-            "embarrassed":   {"rate": "+0%",  "pitch": "+20Hz"},
-            "gentle":        {"rate": "+0%",  "pitch": "+0Hz"},
+            "cheerful":      {"rate": "+0%", "pitch": "+30Hz"},
+            "affectionate":  {"rate": "+0%", "pitch": "+15Hz"},
+            "sad":           {"rate": "+0%", "pitch": "-20Hz"},
+            "angry":         {"rate": "+0%", "pitch": "-15Hz"},
+            "embarrassed":   {"rate": "+0%", "pitch": "+20Hz"},
+            "gentle":        {"rate": "+0%", "pitch": "+0Hz"},
         }
 
         # Use local variables only — never mutate instance state
@@ -474,6 +474,10 @@ class TTSEngine:
         effective_pitch = pitch or emotion_params.get("pitch", self.pitch)
         effective_volume = volume or self.volume
 
+        # speed_ratio override: if App provides speed, use it over emotion rate
+        if speed_ratio is not None:
+            # Map 0.5~2.0 → edge_tts rate format: +0%, +50%, -20%, etc.
+            effective_rate = f"{int((speed_ratio - 1) * 100):+d}%"
 
         communicate = edge_tts.Communicate(
             text,
