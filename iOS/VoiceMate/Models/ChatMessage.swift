@@ -48,3 +48,55 @@ struct ChatRequest: Codable {
         case speed
     }
 }
+
+// MARK: - Voice Clone API Models
+
+/// Response from the voice clone upload endpoint
+struct CloneVoiceResponse: Codable {
+    let voiceId: String
+    let status: String
+    let message: String?
+    
+    enum CodingKeys: String, CodingKey {
+        case voiceId = "voice_id"
+        case status
+        case message
+    }
+}
+
+/// Response from the clone status endpoint
+struct CloneStatusResponse: Codable {
+    let voiceId: String
+    let status: String
+    let name: String?
+    let createdAt: String?
+    
+    enum CodingKeys: String, CodingKey {
+        case voiceId = "voice_id"
+        case status
+        case name
+        case createdAt = "created_at"
+    }
+}
+
+/// Individual cloned voice info
+struct CloneVoiceInfo: Codable, Identifiable {
+    let voiceId: String
+    let name: String?
+    let status: String
+    let createdAt: String?
+    
+    var id: String { voiceId }
+    
+    enum CodingKeys: String, CodingKey {
+        case voiceId = "voice_id"
+        case name
+        case status
+        case createdAt = "created_at"
+    }
+}
+
+/// Wrapper for the list endpoint
+struct CloneVoiceListResponse: Codable {
+    let voices: [CloneVoiceInfo]
+}

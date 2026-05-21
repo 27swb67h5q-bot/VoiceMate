@@ -28,6 +28,9 @@ from typing import Optional
 import torch
 import soundfile as sf
 import numpy as np
+import struct
+import io
+import math
 
 # ChatTTS compatibility: PyTorch 2.12+ requires weights_only=False for tokenizer
 import ChatTTS.core as _chattts_core
@@ -55,8 +58,15 @@ DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.co
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 
 TTS_VOICE = os.environ.get("VOICEMATE_TTS_VOICE", "zh-CN-XiaoxiaoNeural")  # edge-tts Chinese female
+
+# Fish Audio for voice cloning
+FISH_AUDIO_API_KEY = os.environ.get("FISH_AUDIO_API_KEY", "")
+FISH_AUDIO_BASE_URL = "https://api.fish.audio/v1"
 TTS_RATE = os.environ.get("VOICEMATE_TTS_RATE", "+0%")
 TTS_VOLUME = os.environ.get("VOICEMATE_TTS_VOLUME", "+0%")
+CLONE_DIR = Path(os.environ.get("VOICEMATE_CLONE_DIR", "/root/VoiceMate/cloned_voices"))
+CLONE_DIR.mkdir(parents=True, exist_ok=True)
+
 
 # System prompts for different personas
 PERSONAS = {
@@ -109,6 +119,15 @@ class ChatResponse(BaseModel):
 
 
 # ── History Manager (conversation memory) ──────────────────────────────────────
+
+class CloneVoiceInfo(BaseModel):
+    """Stored info about a cloned voice."""
+    voice_id: str
+    name: str = "我的声音"
+    status: str = "completed"  # pending, processing, completed, failed
+    created_at: str = ""
+
+
 
 class HistoryManager:
     """Persists conversation history to disk for context memory."""
@@ -402,7 +421,114 @@ class VolcengineTTS:
             return output_path
 
 
+class FishAudioTTS:
+    """Fish Audio API integration for TTS with cloned voices.
+    
+    Uses Fish Audio REST API directly (no official Python SDK).
+    Supports voice cloning from uploaded samples and TTS with cloned voices.
+    Docs: https://fish.audio/api/
+    """
+    BASE_URL = FISH_AUDIO_BASE_URL
+    
+    def __init__(self):
+        self.api_key = FISH_AUDIO_API_KEY
+        self._session: Optional[aiohttp.ClientSession] = None
+    
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(headers={
+                "Authorization": f"Bearer {self.api_key}",
+            })
+        return self._session
+    
+    async def close(self):
+        if self._session and not self._session.closed:
+            await self._session.close()
+    
+    @property
+    def is_available(self) -> bool:
+        return bool(self.api_key)
+    
+    async def create_voice(self, audio_files: list[tuple[str, bytes]], 
+                           name: str = "voicemate_clone") -> str:
+        """Upload audio samples to Fish Audio and create a cloned voice.
+        
+        Returns the voice_id on success.
+        Raises HTTPException on failure.
+        """
+        if not self.is_available:
+            raise HTTPException(status_code=400, detail="Fish Audio API key not configured")
+        
+        session = await self._get_session()
+        
+        # Fish Audio model training API: POST /v1/voices
+        # Accepts up to 10 audio files, each 5-30 seconds
+        form = aiohttp.FormData()
+        for filename, data in audio_files:
+            form.add_field("files", data, filename=filename, content_type="audio/m4a")
+        form.add_field("name", name)
+        form.add_field("title", name)
+        form.add_field("description", "Voice clone for VoiceMate app")
+        
+        url = f"{self.BASE_URL}/voices"
+        async with session.post(url, data=form) as resp:
+            if resp.status != 200:
+                body = await resp.text()
+                logger.error(f"Fish Audio create_voice failed ({resp.status}): {body}")
+                raise HTTPException(status_code=502, detail=f"Fish Audio API error: {body}")
+            result = await resp.json()
+            voice_id = result.get("voice_id", "")
+            if not voice_id:
+                raise HTTPException(status_code=502, detail="Fish Audio: no voice_id in response")
+            logger.info(f"Fish Audio voice created: {voice_id}")
+            return voice_id
+    
+    async def get_voice_status(self, voice_id: str) -> dict:
+        """Check the training/status of a cloned voice."""
+        session = await self._get_session()
+        url = f"{self.BASE_URL}/voices/{voice_id}"
+        async with session.get(url) as resp:
+            if resp.status != 200:
+                return {"status": "unknown"}
+            return await resp.json()
+    
+    async def synthesize(self, text: str, voice_id: str,
+                         speed_ratio: float = 1.0) -> tuple[str, int]:
+        """Synthesize speech using a cloned voice.
+        
+        Returns (audio_file_path, duration_ms).
+        """
+        session = await self._get_session()
+        
+        url = f"{self.BASE_URL}/tts"
+        payload = {
+            "text": text,
+            "voice_id": voice_id,
+            "speed": speed_ratio,
+            "format": "mp3",
+        }
+        
+        async with session.post(url, json=payload) as resp:
+            if resp.status != 200:
+                body = await resp.text()
+                logger.error(f"Fish Audio TTS failed ({resp.status}): {body}")
+                raise RuntimeError(f"Fish Audio TTS failed: {body}")
+            
+            audio_data = await resp.read()
+            
+            audio_id = str(uuid.uuid4())[:8]
+            output_path = str(AUDIO_DIR / f"fish_{audio_id}.mp3")
+            with open(output_path, "wb") as f:
+                f.write(audio_data)
+            
+            # Estimate duration from audio data
+            duration_ms = max(int(len(audio_data) / 2400 * 1000), 1000)
+            logger.info(f"Fish Audio TTS (voice {voice_id[:12]}...) -> {output_path} ({duration_ms}ms)")
+            return output_path, duration_ms
+
 class TTSEngine:
+
+
     def __init__(self):
         self.voice = TTS_VOICE
         self.rate = TTS_RATE
@@ -410,6 +536,7 @@ class TTSEngine:
         self.pitch = "+0Hz"
         self.chattts = ChatTTSEngine()
         self.volc = VolcengineTTS()
+        self.fish = FishAudioTTS()
 
     async def _synthesize_edge_tts(
         self,
@@ -525,12 +652,20 @@ class TTSEngine:
         """Convert text to speech with emotion, return (audio_path, duration_ms).
         
         Priority:
-          - If voice is explicitly specified → edge_tts directly (ChatTTS/Volcengine don't respect user's voice choice)
+          - voice starts with "fish_" → Fish Audio cloned voice
+          - voice is explicitly specified → edge_tts directly
           - If no voice specified → ChatTTS (local GPU) → Volcengine (cloud API) → edge_tts (default voice)
 
         """
-        # If user explicitly chose a voice, use edge_tts directly
-        # (ChatTTS and Volcengine have their own internal voices and ignore the user's selection)
+        # Cloned voice via Fish Audio
+        if voice is not None and voice.startswith("fish_") and self.fish.is_available:
+            fish_voice_id = voice[5:]  # strip "fish_" prefix
+            try:
+                return await self.fish.synthesize(text, fish_voice_id, speed_ratio or 1.0)
+            except Exception as e:
+                logger.warning(f"Fish Audio TTS failed (voice={fish_voice_id[:12]}...), falling back: {e}")
+        
+        # If user explicitly chose a voice (non-clone), use edge_tts directly
         if voice is not None:
             return await self._synthesize_edge_tts(text, emotion, speed_ratio, voice, rate, pitch, volume)
 
@@ -553,11 +688,16 @@ class TTSEngine:
         # 3) edge_tts fallback
         return await self._synthesize_edge_tts(text, emotion, speed_ratio, voice, rate, pitch, volume)
 
+
+
 # ── Initialize Services ─────────────────────────────────────────────────────
 
 deepseek = DeepSeekClient()
 tts = TTSEngine()
 history = HistoryManager()
+# Load cloned voices database
+_load_clone_db()
+
 
 # In-memory conversation store (simple for MVP, will persist later)
 conversations: dict[str, list[dict]] = {}
@@ -830,13 +970,318 @@ async def ws_chat(websocket: WebSocket):
 
 # ── Placeholder for Phase 2: real-time voice conversation
 
-# Placeholder for Phase 2: real-time voice conversation
-# @app.websocket("/v1/ws/voice")
-# async def voice_websocket(websocket: WebSocket):
-#     await websocket.accept()
-#     # Stream audio in, stream audio out
-#     # Uses streaming ASR + streaming LLM + streaming TTS
-#     ...
+
+# ── Voice Clone API (Fish Audio) ──────────────────────────────────────────────
+
+VOICE_CLONE_DB = {}  # In-memory: {voice_id: {"name": str, "status": str, "created_at": str}}
+
+
+@app.post("/v1/clone/upload")
+async def clone_upload(files: list[UploadFile] = File(...)):
+    """Upload voice samples and create a Fish Audio cloned voice.
+    
+    Accepts 3-10 audio recordings (5-30 seconds each) of the same speaker.
+    Returns a voice_id that can be used as the `voice` parameter in chat.
+    """
+    if not tts.fish.is_available:
+        raise HTTPException(status_code=400, detail="Fish Audio API key not configured. Set FISH_AUDIO_API_KEY in .env")
+    
+    if len(files) < 3:
+        raise HTTPException(status_code=400, detail="至少需要上传 3 段录音样本")
+    if len(files) > 10:
+        raise HTTPException(status_code=400, detail="最多上传 10 段录音样本")
+    
+    # Read all audio files
+    audio_files: list[tuple[str, bytes]] = []
+    for f in files:
+        data = await f.read()
+        if len(data) == 0:
+            continue
+        if len(data) > 10 * 1024 * 1024:  # 10MB max per file
+            raise HTTPException(status_code=400, detail=f"文件 {f.filename} 太大，每个文件最大 10MB")
+        audio_files.append((f.filename or f"sample_{len(audio_files)}.m4a", data))
+    
+    if len(audio_files) < 3:
+        raise HTTPException(status_code=400, detail="需要至少 3 个非空音频文件")
+    
+    # Create voice via Fish Audio
+    voice_id = await tts.fish.create_voice(audio_files)
+    
+    # Save metadata locally
+    voice_info = {
+        "voice_id": voice_id,
+        "name": "我的声音",
+        "status": "processing",  # Fish Audio may need time to train
+        "created_at": datetime.utcnow().isoformat(),
+    }
+    
+    # Store in memory + persistent JSON
+    VOICE_CLONE_DB[voice_id] = voice_info
+    _save_clone_db()
+    
+    return {
+        "voice_id": f"fish_{voice_id}",
+        "status": "processing",
+        "message": "声音样本已上传，正在生成克隆声音（可能需要几分钟）",
+    }
+
+
+@app.get("/v1/clone/voices")
+async def list_cloned_voices():
+    """List all cloned voices."""
+    return {"voices": list(VOICE_CLONE_DB.values())}
+
+
+@app.get("/v1/clone/status/{voice_id}")
+async def clone_status(voice_id: str):
+    """Check the status of a voice clone training job."""
+    # Strip fish_ prefix if provided
+    raw_id = voice_id[5:] if voice_id.startswith("fish_") else voice_id
+    
+    info = VOICE_CLONE_DB.get(raw_id)
+    if not info:
+        raise HTTPException(status_code=404, detail="Voice clone not found")
+    
+    # Optionally refresh status from Fish Audio
+    if info["status"] == "processing":
+        try:
+            remote = await tts.fish.get_voice_status(raw_id)
+            remote_status = remote.get("status", "completed")
+            if remote_status == "completed":
+                info["status"] = "completed"
+                _save_clone_db()
+        except Exception:
+            pass  # Keep local status
+    
+    return {
+        "voice_id": f"fish_{raw_id}",
+        "status": info["status"],
+        "name": info["name"],
+        "created_at": info["created_at"],
+    }
+
+
+@app.delete("/v1/clone/voices/{voice_id}")
+async def delete_cloned_voice(voice_id: str):
+    """Delete a cloned voice."""
+    raw_id = voice_id[5:] if voice_id.startswith("fish_") else voice_id
+    if raw_id in VOICE_CLONE_DB:
+        del VOICE_CLONE_DB[raw_id]
+        _save_clone_db()
+        return {"status": "deleted"}
+    raise HTTPException(status_code=404, detail="Voice clone not found")
+
+
+def _save_clone_db():
+    """Persist clone DB to disk."""
+    db_path = CLONE_DIR / "clone_db.json"
+    try:
+        db_path.write_text(json.dumps(VOICE_CLONE_DB, ensure_ascii=False, indent=2))
+    except Exception as e:
+        logger.error(f"Failed to save clone DB: {e}")
+
+
+def _load_clone_db():
+    """Load clone DB from disk on startup."""
+    db_path = CLONE_DIR / "clone_db.json"
+    if db_path.exists():
+        try:
+            data = json.loads(db_path.read_text())
+            VOICE_CLONE_DB.update(data)
+            logger.info(f"Loaded {len(data)} cloned voices from disk")
+        except Exception as e:
+            logger.error(f"Failed to load clone DB: {e}")
+
+
+
+# ── Real-Time Voice Conversation Helpers ──────────────────────────────────────
+
+async def _stream_tts_to_websocket(websocket, text: str, voice=None, speed_ratio=None):
+    """Generate TTS audio and stream it as PCM chunks via WebSocket."""
+    import edge_tts
+    
+    effective_voice = voice or TTS_VOICE
+    
+    rate_str = "+0%"
+    if speed_ratio is not None:
+        rate_str = f"{int((speed_ratio - 1) * 100):+d}%"
+    
+    communicate = edge_tts.Communicate(text, effective_voice, rate=rate_str)
+    
+    mp3_data = b""
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            mp3_data += chunk["data"]
+    
+    if not mp3_data:
+        logger.warning("TTS produced no audio data")
+        return
+    
+    # Decode MP3 to PCM 24kHz 16-bit mono via ffmpeg
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-i", "pipe:0",
+            "-f", "s16le", "-acodec", "pcm_s16le",
+            "-ar", "24000", "-ac", "1",
+            "pipe:1",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        pcm_data, stderr = await proc.communicate(input=mp3_data)
+        if proc.returncode != 0:
+            logger.error(f"ffmpeg decode failed: {stderr.decode(errors='replace')[:200]}")
+            return
+    except FileNotFoundError:
+        logger.error("ffmpeg not found, cannot stream TTS audio")
+        return
+    
+    # Signal audio start
+    await websocket.send_json({"type": "audio_start", "sample_rate": 24000, "channels": 1})
+    
+    # Stream PCM chunks (50ms = 2400 bytes at 24000Hz 16-bit mono)
+    chunk_size = 2400
+    offset = 0
+    while offset < len(pcm_data):
+        end = min(offset + chunk_size, len(pcm_data))
+        await websocket.send_bytes(pcm_data[offset:end])
+        offset = end
+        await asyncio.sleep(0.01)
+    
+    await websocket.send_json({"type": "audio_end"})
+
+
+# ── Real-Time Voice WebSocket ──────────────────────────────────────────────
+
+@app.websocket("/v1/ws/voice")
+async def ws_voice_realtime(websocket: WebSocket):
+    """Real-time voice conversation WebSocket.
+    
+    Protocol:
+      Client -> Server (JSON):
+        {"type": "text", "text": "...", "voice": "...", "persona": "...", "conversation_id": "...", "speed": 1.0}
+        {"type": "ping"}
+      
+      Server -> Client (JSON):
+        {"type": "token", "content": "partial LLM output"}
+        {"type": "audio_start", "sample_rate": 24000, "channels": 1}
+        (binary PCM16 chunks follow)
+        {"type": "audio_end"}
+        {"type": "done", "conversation_id": "..."}
+        {"type": "pong"}
+        {"type": "error", "message": "..."}
+    """
+    await websocket.accept()
+    
+    conv_id = str(uuid.uuid4())
+    persona = DEFAULT_PERSONA
+    voice = None
+    speed = None
+    
+    logger.info(f"Real-time voice call started: {conv_id}")
+    
+    try:
+        while True:
+            try:
+                message = await asyncio.wait_for(websocket.receive(), timeout=120.0)
+            except asyncio.TimeoutError:
+                logger.info(f"Voice call timeout: {conv_id}")
+                try:
+                    await websocket.send_json({"type": "error", "message": "连接超时"})
+                except Exception:
+                    pass
+                break
+            
+            msg_type = message.get("type")
+            
+            if msg_type == "websocket.disconnect":
+                break
+            
+            if msg_type == "websocket.receive":
+                msg_text = message.get("text")
+                if msg_text is None:
+                    continue
+                
+                try:
+                    data = json.loads(msg_text)
+                except json.JSONDecodeError:
+                    continue
+                
+                command = data.get("type", "")
+                
+                if command == "ping":
+                    try:
+                        await websocket.send_json({"type": "pong"})
+                    except Exception:
+                        pass
+                    continue
+                
+                if command == "text":
+                    text = data.get("text", "").strip()
+                    if not text:
+                        continue
+                    
+                    if "voice" in data:
+                        voice = data["voice"]
+                    if "persona" in data:
+                        persona = data["persona"]
+                    if "speed" in data:
+                        speed = data["speed"]
+                    if "conversation_id" in data and data["conversation_id"]:
+                        conv_id = data["conversation_id"]
+                    
+                    logger.info(f"Voice call turn [{conv_id}]: {text[:60]}")
+                    
+                    conv_history = history.load(conv_id)
+                    
+                    full_reply = ""
+                    try:
+                        async for token in deepseek.stream_chat(text, conv_history, persona=persona):
+                            full_reply += token
+                            await websocket.send_json({"type": "token", "content": token})
+                    except Exception as e:
+                        logger.error(f"DeepSeek streaming failed: {e}")
+                        await websocket.send_json({"type": "error", "message": "AI回复失败"})
+                        continue
+                    
+                    if not full_reply:
+                        full_reply = "嗯，我听到了呢～"
+                    
+                    clean_reply = strip_markdown(full_reply)
+                    clean_reply = naturalize_text(clean_reply)
+                    
+                    history.append(conv_id, text, clean_reply)
+                    
+                    try:
+                        await _stream_tts_to_websocket(websocket, clean_reply, voice=voice, speed_ratio=speed)
+                    except Exception as e:
+                        logger.error(f"TTS streaming failed: {e}")
+                        await websocket.send_json({"type": "error", "message": "语音合成失败"})
+                        continue
+                    
+                    try:
+                        await websocket.send_json({
+                            "type": "done",
+                            "conversation_id": conv_id,
+                        })
+                    except Exception:
+                        pass
+    
+    except WebSocketDisconnect:
+        logger.info(f"Voice call disconnected: {conv_id}")
+    except Exception as e:
+        logger.error(f"Voice call error: {e}")
+        try:
+            await websocket.send_json({"type": "error", "message": str(e)})
+        except Exception:
+            pass
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
 
 
 # ── Proactive Push Messages ──────────────────────────────────────────────────

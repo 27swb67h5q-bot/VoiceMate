@@ -2,13 +2,17 @@ import SwiftUI
 import AVFoundation
 
 /// Voice cloning setup view
-/// Records voice samples for AI voice cloning (placeholder - API integration TBD)
+/// Records voice samples and uploads to backend for Fish Audio voice cloning
 struct VoiceCloneView: View {
-    @AppStorage("cloned_voice_id") private var clonedVoiceId = ""
+    @AppStorage("cloned_voice_id") private var storedCloneVoiceId = ""
+    @StateObject private var voiceService = VoiceMateService()
     @State private var recordings: [VoiceSample] = []
     @State private var isRecording = false
     @State private var currentPhrase = ""
     @State private var audioRecorder: AVAudioRecorder?
+    @State private var isUploading = false
+    @State private var uploadError: String?
+    @State private var cloneStatus: String = ""
     
     let phrases = [
         "你好，今天天气真不错",
@@ -18,10 +22,15 @@ struct VoiceCloneView: View {
         "好的，我明白了",
     ]
     
+    var effectiveCloneVoiceId: String {
+        // The voice_id stored from server is "fish_<id>" format — use it directly as the voice parameter
+        storedCloneVoiceId
+    }
+    
     var body: some View {
         List {
             Section {
-                if clonedVoiceId.isEmpty {
+                if storedCloneVoiceId.isEmpty && cloneStatus.isEmpty {
                     VStack(spacing: 16) {
                         Image(systemName: "waveform.circle")
                             .font(.system(size: 48))
@@ -36,13 +45,21 @@ struct VoiceCloneView: View {
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 20)
                     .listRowBackground(Color.clear)
-                } else {
+                } else if !storedCloneVoiceId.isEmpty {
                     HStack {
                         Image(systemName: "checkmark.circle.fill")
                             .foregroundColor(.green)
-                        Text("已生成专属声音 ID: \(clonedVoiceId.prefix(12))...")
-                            .font(.caption)
-                            .foregroundColor(.gray)
+                        Text("✓ 已生成专属声音")
+                            .font(.subheadline)
+                            .foregroundColor(.green)
+                    }
+                } else if cloneStatus == "processing" {
+                    HStack {
+                        ProgressView()
+                            .scaleEffect(0.8)
+                        Text("正在生成克隆声音（约1-2分钟）...")
+                            .font(.subheadline)
+                            .foregroundColor(.orange)
                     }
                 }
             }
@@ -77,6 +94,7 @@ struct VoiceCloneView: View {
                                     .foregroundColor(isRecording ? .red : .purple)
                             }
                             .buttonStyle(.borderless)
+                            .disabled(isUploading)
                         } else if index < recordings.count {
                             Button(action: { playSample(index) }) {
                                 Image(systemName: "play.circle")
@@ -84,30 +102,52 @@ struct VoiceCloneView: View {
                                     .foregroundColor(.purple)
                             }
                             .buttonStyle(.borderless)
+                            .disabled(isUploading)
                         }
                     }
                     .padding(.vertical, 4)
                 }
             }
             
-            if recordings.count == phrases.count && clonedVoiceId.isEmpty {
+            if recordings.count == phrases.count && storedCloneVoiceId.isEmpty && cloneStatus != "processing" {
                 Section {
                     Button(action: generateClone) {
                         HStack {
                             Spacer()
-                            Image(systemName: "sparkles")
-                            Text("生成专属声音")
+                            if isUploading {
+                                ProgressView()
+                                    .scaleEffect(0.8)
+                                    .tint(.white)
+                            } else {
+                                Image(systemName: "sparkles")
+                            }
+                            Text(isUploading ? "上传中..." : "生成专属声音")
                             Spacer()
                         }
                         .foregroundColor(.white)
                         .padding(.vertical, 8)
                     }
                     .listRowBackground(Color.purple)
+                    .disabled(isUploading)
                 }
             }
             
-            if !clonedVoiceId.isEmpty {
+            if let error = uploadError {
                 Section {
+                    HStack {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.red)
+                        Text(error)
+                            .font(.caption)
+                            .foregroundColor(.red)
+                    }
+                }
+            }
+            
+            if !storedCloneVoiceId.isEmpty {
+                Section {
+                    Button("使用克隆声音聊天", action: selectCloneVoice)
+                        .foregroundColor(.purple)
                     Button("重新录制", role: .destructive) {
                         resetRecording()
                     }
@@ -116,6 +156,32 @@ struct VoiceCloneView: View {
         }
         .navigationTitle("声音克隆")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            // Refresh status of existing clone
+            if !storedCloneVoiceId.isEmpty {
+                refreshCloneStatus()
+            }
+        }
+    }
+    
+    private func selectCloneVoice() {
+        // Set the cloned voice as the active TTS voice in settings
+        // Uses @AppStorage("selected_voice") so ContentView picks it up automatically
+        UserDefaults.standard.set(storedCloneVoiceId, forKey: "selected_voice")
+    }
+    
+    private func refreshCloneStatus() {
+        guard !storedCloneVoiceId.isEmpty else { return }
+        Task {
+            do {
+                let status = try await voiceService.checkCloneStatus(voiceId: storedCloneVoiceId)
+                await MainActor.run {
+                    cloneStatus = status.status
+                }
+            } catch {
+                // Silently fail — the voice is still usable
+            }
+        }
     }
     
     private func toggleRecording() {
@@ -162,18 +228,78 @@ struct VoiceCloneView: View {
     
     private func playSample(_ index: Int) {
         guard index < recordings.count else { return }
-        // TODO: Audio playback for reviewing samples
+        let url = recordings[index].fileURL
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+        let player = try? AVAudioPlayer(contentsOf: url)
+        player?.play()
     }
     
     private func generateClone() {
-        // TODO: Upload samples to voice cloning API (Fish Audio / ElevenLabs)
-        // For now, just set a placeholder ID so UI shows "已完成"
-        clonedVoiceId = "pending_clone_\(UUID().uuidString.prefix(8))"
+        guard recordings.count == phrases.count else { return }
+        
+        uploadError = nil
+        isUploading = true
+        cloneStatus = "uploading"
+        
+        Task {
+            do {
+                let fileURLs = recordings.map { $0.fileURL }
+                let response = try await voiceService.createCloneVoice(fileURLs: fileURLs)
+                
+                await MainActor.run {
+                    isUploading = false
+                    storedCloneVoiceId = response.voiceId  // e.g. "fish_abc123"
+                    cloneStatus = response.status
+                    
+                    // Start polling for completion
+                    pollCloneStatus()
+                }
+            } catch {
+                await MainActor.run {
+                    isUploading = false
+                    cloneStatus = ""
+                    uploadError = "上传失败: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+    
+    private func pollCloneStatus() {
+        guard !storedCloneVoiceId.isEmpty else { return }
+        
+        Task {
+            var retries = 0
+            let maxRetries = 30  // Poll for up to ~60 seconds
+            
+            while retries < maxRetries {
+                do {
+                    let status = try await voiceService.checkCloneStatus(voiceId: storedCloneVoiceId)
+                    await MainActor.run {
+                        cloneStatus = status.status
+                    }
+                    
+                    if status.status == "completed" {
+                        await MainActor.run {
+                            // Automatically select the cloned voice
+                            UserDefaults.standard.set(storedCloneVoiceId, forKey: "selected_voice")
+                        }
+                        return
+                    }
+                } catch {
+                    // Transient error — keep polling
+                }
+                
+                retries += 1
+                try? await Task.sleep(nanoseconds: 2_000_000_000)  // 2 seconds
+            }
+        }
     }
     
     private func resetRecording() {
-        clonedVoiceId = ""
+        storedCloneVoiceId = ""
         recordings = []
+        cloneStatus = ""
+        uploadError = nil
         // Clean up temp files
         for i in 0..<phrases.count {
             let url = FileManager.default.temporaryDirectory

@@ -75,7 +75,13 @@ struct ContentView: View {
                 SettingsView(service: voiceService)
             }
             .sheet(isPresented: $showRealtimeCall) {
-                RealtimeCallView()
+                RealtimeCallView(
+                    serverHost: voiceService.serverHost,
+                    serverPort: voiceService.serverPort,
+                    voice: voiceService.selectedVoice,
+                    persona: voiceService.selectedPersona,
+                    speed: voiceService.speechSpeed
+                )
             }
             .alert("连接失败", isPresented: $showConnectionError) {
                 Button("设置", action: { showSettings = true })
@@ -687,11 +693,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) var dismiss
     @AppStorage("selected_voice") private var selectedVoice = "zh-CN-XiaoxiaoNeural"
     
-    let voices = [
-        ("zh-CN-XiaoxiaoNeural", "小晓 (温柔女声)"),
-        ("zh-CN-XiaoyiNeural", "小伊 (活泼女声)"),
-        ("zh-CN-XiaoxuanNeural", "小萱 (软萌女声)"),
-    ]
+    @AppStorage("cloned_voice_id") private var clonedVoiceId = ""
     
     var body: some View {
         NavigationStack {
@@ -714,8 +716,17 @@ struct SettingsView: View {
                 
                 Section("语音设置") {
                     Picker("AI 声音", selection: $selectedVoice) {
-                        ForEach(voices, id: \.0) { voice in
-                            Text(voice.1).tag(voice.0)
+                        // Standard edge-tts voices
+                        Section(header: Text("标准语音")) {
+                            Text("小晓 (温柔女声)").tag("zh-CN-XiaoxiaoNeural")
+                            Text("小伊 (活泼女声)").tag("zh-CN-XiaoyiNeural")
+                            Text("小萱 (软萌女声)").tag("zh-CN-XiaoxuanNeural")
+                        }
+                        // Cloned voice if available
+                        if !clonedVoiceId.isEmpty {
+                            Section(header: Text("克隆声音")) {
+                                Text("我的声音").tag(clonedVoiceId)
+                            }
                         }
                     }
                     Text("选择 AI 回复时使用的语音")

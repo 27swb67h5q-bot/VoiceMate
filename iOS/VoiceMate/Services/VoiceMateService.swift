@@ -222,6 +222,67 @@ class VoiceMateService: ObservableObject {
         }
     }
 }
+    
+    // MARK: - Voice Clone API
+    
+    /// Upload recorded voice samples and create a cloned voice.
+    /// - Parameter fileURLs: Array of local file URLs for the recorded samples (5 phrases).
+    /// - Returns: Voice clone response with voice_id and status.
+    func createCloneVoice(fileURLs: [URL]) async throws -> CloneVoiceResponse {
+        await MainActor.run { isProcessing = true }
+        defer { Task { @MainActor in isProcessing = false } }
+        
+        let url = URL(string: "\(baseURL)/v1/clone/upload")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        
+        let boundary = UUID().uuidString
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        
+        var bodyData = Data()
+        for fileURL in fileURLs {
+            let fileData = try Data(contentsOf: fileURL)
+            bodyData.append("--\(boundary)\r\n".data(using: .utf8)!)
+            bodyData.append("Content-Disposition: form-data; name=\"files\"; filename=\"\(fileURL.lastPathComponent)\"\r\n".data(using: .utf8)!)
+            bodyData.append("Content-Type: audio/m4a\r\n\r\n".data(using: .utf8)!)
+            bodyData.append(fileData)
+            bodyData.append("\r\n".data(using: .utf8)!)
+        }
+        bodyData.append("--\(boundary)--\r\n".data(using: .utf8)!)
+        request.httpBody = bodyData
+        
+        let (data, response) = try await session.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw VoiceMateError.invalidResponse
+        }
+        guard httpResponse.statusCode == 200 else {
+            let body = String(data: data, encoding: .utf8) ?? "unknown"
+            throw VoiceMateError.serverError(statusCode: httpResponse.statusCode, body: body)
+        }
+        
+        let result = try JSONDecoder().decode(CloneVoiceResponse.self, from: data)
+        return result
+    }
+    
+    /// Check the status of a voice clone training job.
+    func checkCloneStatus(voiceId: String) async throws -> CloneStatusResponse {
+        let url = URL(string: "\(baseURL)/v1/clone/status/\(voiceId)")!
+        let (data, response) = try await session.data(from: url)
+        
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+            throw VoiceMateError.invalidResponse
+        }
+        return try JSONDecoder().decode(CloneStatusResponse.self, from: data)
+    }
+    
+    /// List all cloned voices from the server.
+    func listClonedVoices() async throws -> [CloneVoiceInfo] {
+        let url = URL(string: "\(baseURL)/v1/clone/voices")!
+        let (data, _) = try await session.data(from: url)
+        let wrapper = try JSONDecoder().decode(CloneVoiceListResponse.self, from: data)
+        return wrapper.voices
+    }
 
 // MARK: - Errors
 
