@@ -1,3 +1,4 @@
+from datetime import datetime
 #!/usr/bin/env python3
 """
 VoiceMate Backend - FastAPI server for AI voice companion
@@ -171,6 +172,15 @@ class DeepSeekClient:
     def _build_messages(self, text: str, history: list = None, persona: str = None) -> list:
         system_prompt = PERSONAS.get(persona, PERSONAS[DEFAULT_PERSONA])
         messages = [{"role": "system", "content": system_prompt}]
+        # Inject current time for temporal context
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M %A")
+        # Map English weekday to Chinese
+        weekday_map = {"Monday": "星期一", "Tuesday": "星期二", "Wednesday": "星期三",
+                       "Thursday": "星期四", "Friday": "星期五", "Saturday": "星期六", "Sunday": "星期日"}
+        cn_weekday = weekday_map.get(current_time.split()[-1], current_time.split()[-1])
+        current_time_cn = current_time.rsplit(" ", 1)[0] + " " + cn_weekday
+        messages.append({"role": "user", "content": f"现在是北京时间 {current_time_cn}"})
+        messages.append({"role": "assistant", "content": f"知道了，现在是 {current_time_cn}！"})
         if history:
             messages.extend(history)
         messages.append({"role": "user", "content": text})
