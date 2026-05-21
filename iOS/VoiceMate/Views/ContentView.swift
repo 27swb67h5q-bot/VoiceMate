@@ -724,6 +724,7 @@ struct MessageBubble: View {
             )
         }
         .buttonStyle(.plain)
+        .disabled(isSelecting)
     }
     
     private func playAudio(_ path: String) {
