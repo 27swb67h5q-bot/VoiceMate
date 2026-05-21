@@ -167,10 +167,11 @@ class RealtimeCallService: NSObject, ObservableObject {
     
     private func sendJson(_ dict: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: dict),
+              let jsonString = String(data: data, encoding: .utf8),
               let task = wsTask else {
             return
         }
-        task.send(.data(data)) { error in
+        task.send(.string(jsonString)) { error in
             if let error = error {
                 self.logger("Send error: \(error.localizedDescription)")
             }
@@ -253,13 +254,8 @@ class RealtimeCallService: NSObject, ObservableObject {
                 if let convId = json["conversation_id"] as? String {
                     conversationId = convId
                 }
-                DispatchQueue.main.async {
-                    self.isAISpeaking = false
-                }
-                // After AI finishes, start recording again for next turn
-                if self.isCallActive {
-                    self.startRecording()
-                }
+                // Recording will restart in audioPlayerDidFinishPlaying
+                // to avoid starting mic while AI is still speaking
                 
             case "pong":
                 break // Keepalive acknowledged

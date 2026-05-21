@@ -1261,11 +1261,22 @@ async def ws_voice_realtime(websocket: WebSocket):
             if msg_type == "websocket.receive":
                 msg_text = message.get("text")
                 if msg_text is None:
-                    continue
+                    # iOS sends JSON as binary frames; try decoding from bytes
+                    msg_bytes = message.get("bytes")
+                    if msg_bytes is not None:
+                        try:
+                            msg_text = msg_bytes.decode("utf-8")
+                        except UnicodeDecodeError:
+                            logger.warning("Received non-UTF-8 binary message, skipping")
+                            continue
+                    else:
+                        logger.warning("Received websocket.receive with no text or bytes payload")
+                        continue
                 
                 try:
                     data = json.loads(msg_text)
                 except json.JSONDecodeError:
+                    logger.warning(f"Invalid JSON from client: {msg_text[:100]}")
                     continue
                 
                 command = data.get("type", "")
