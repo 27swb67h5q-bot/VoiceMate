@@ -26,7 +26,6 @@ struct ContentView: View {
     
     // Keyboard handling
     @FocusState private var isTextFieldFocused: Bool
-    @State private var keyboardHeight: CGFloat = 0
     
     // Proactive timer
     @State private var proactiveTimer: Timer? = nil
@@ -185,46 +184,6 @@ struct ContentView: View {
                     }
                 }
             }
-            .onChange(of: isTextFieldFocused) { focused in
-                if focused, let last = messages.last {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                        withAnimation(.easeOut(duration: 0.25)) {
-                            proxy.scrollTo(last.id, anchor: .bottom)
-                        }
-                    }
-                }
-            }
-            .onChange(of: keyboardHeight) { height in
-                if height > 0, let last = messages.last {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                        withAnimation(.easeOut(duration: 0.25)) {
-                            proxy.scrollTo(last.id, anchor: .bottom)
-                        }
-                    }
-                }
-            }
-            .onAppear {
-                NotificationCenter.default.addObserver(
-                    forName: UIResponder.keyboardWillShowNotification,
-                    object: nil,
-                    queue: .main
-                ) { notification in
-                    if let keyboardFrame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect {
-                        withAnimation(.easeOut(duration: 0.25)) {
-                            keyboardHeight = keyboardFrame.height
-                        }
-                    }
-                }
-                NotificationCenter.default.addObserver(
-                    forName: UIResponder.keyboardWillHideNotification,
-                    object: nil,
-                    queue: .main
-                ) { _ in
-                    withAnimation(.easeOut(duration: 0.25)) {
-                        keyboardHeight = 0
-                    }
-                }
-            }
         }
     }
     
@@ -294,8 +253,6 @@ struct ContentView: View {
             .padding(.bottom, 4)
         }
         .background(Color(.systemGray6).opacity(0.95))
-        .padding(.bottom, keyboardHeight)
-        .ignoresSafeArea(.keyboard)
     }
     
     // MARK: - Text Input Area
