@@ -591,11 +591,7 @@ struct SettingsView: View {
     let voices = [
         ("zh-CN-XiaoxiaoNeural", "小晓 (温柔女声)"),
         ("zh-CN-XiaoyiNeural", "小伊 (活泼女声)"),
-        ("zh-CN-XiaomengNeural", "小梦 (甜美女声)"),
-        ("zh-CN-XiaohanNeural", "小涵 (知性女声)"),
-        ("zh-CN-XiaomoNeural", "小莫 (御姐女声)"),
         ("zh-CN-XiaoxuanNeural", "小萱 (软萌女声)"),
-        ("zh-CN-XiaotongNeural", "小桐 (元气女声)"),
     ]
     
     var body: some View {

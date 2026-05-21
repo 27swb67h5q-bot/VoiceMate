@@ -470,7 +470,19 @@ class TTSEngine:
         )
 
         start = time.time()
-        await communicate.save(raw_path)
+        try:
+            await communicate.save(raw_path)
+        except Exception as e:
+            logger.warning(f"edge_tts failed with voice {effective_voice}: {e}")
+            logger.info("Falling back to zh-CN-XiaoxiaoNeural (default)")
+            communicate = edge_tts.Communicate(
+                text,
+                "zh-CN-XiaoxiaoNeural",
+                rate=effective_rate,
+                volume=effective_volume,
+                pitch=effective_pitch,
+            )
+            await communicate.save(raw_path)
         elapsed = time.time() - start
 
         # Rough estimate: edge-tts generates ~50 chars/sec for Chinese
