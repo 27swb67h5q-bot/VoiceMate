@@ -71,7 +71,10 @@ class RealtimeCallService: NSObject, ObservableObject {
     
     // MARK: - Audio Playback (Streaming)
     private var audioPlayerNode: AVAudioPlayerNode?
-    private var audioEngineP: AVAudioEngine?  // playback-only engine
+    /// Playback audio buffer queue — buffers arriving chunks while player is busy
+    private let playbackQueue = DispatchQueue(label: "com.voicemate.playback", qos: .userInitiated)
+    private var pendingBuffers: [AVAudioPCMBuffer] = []
+    private var isPlaybackScheduled = false
 
     /// Callback invoked per-turn when a user utterance or AI reply completes
     var onTurnCompleted: ((_ isUser: Bool, _ text: String) -> Void)?
@@ -329,10 +332,6 @@ class RealtimeCallService: NSObject, ObservableObject {
             case "audio_start":
                 self.isAISpeaking = true
                 self.isUserSpeaking = false
-                if !self.aiText.isEmpty {
-                    self.transcript.append((isUser: false, text: self.aiText))
-                }
-                self.aiText = ""
                 if let sr = json["sample_rate"] as? Double {
                     self.audioSampleRate = sr
                 }
@@ -495,12 +494,12 @@ class RealtimeCallService: NSObject, ObservableObject {
     }
 
     private func handleAudioData(_ data: Data) {
-        // PCM16 audio chunks from server — play immediately
-        guard let playerNode = audioPlayerNode, let engine = audioEngineP, engine.isRunning else {
+        // PCM16 audio chunks from server — play via the single engine
+        guard let playerNode = audioPlayerNode, let format = playbackFormat else {
             return
         }
         
-        guard let format = playbackFormat else { return }
+        guard engineSupportsPlayback() else { return }
         
         let frameLength = data.count / 2  // 16-bit samples
         guard frameLength > 0 else { return }
@@ -527,8 +526,34 @@ class RealtimeCallService: NSObject, ObservableObject {
             memcpy(dstPtr, floatBuffer, frameLength * MemoryLayout<Float>.size)
         }
         
-        playerNode.scheduleBuffer(pcmBuffer) {
-            // Buffer played — do nothing special
+        playbackQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.pendingBuffers.append(pcmBuffer)
+            self.scheduleNextPlaybackBuffer(playerNode: playerNode)
+        }
+    }
+    
+    /// Check if the audio engine is properly configured for playback
+    private func engineSupportsPlayback() -> Bool {
+        guard audioEngine.isRunning else { return false }
+        guard audioPlayerNode != nil else { return false }
+        guard playbackFormat != nil else { return false }
+        return true
+    }
+    
+    /// Schedule the next buffer from the pending queue on the player node
+    private func scheduleNextPlaybackBuffer(playerNode: AVAudioPlayerNode) {
+        guard !isPlaybackScheduled, !pendingBuffers.isEmpty else { return }
+        
+        let buffer = pendingBuffers.removeFirst()
+        isPlaybackScheduled = true
+        
+        playerNode.scheduleBuffer(buffer) { [weak self] in
+            guard let self = self else { return }
+            self.playbackQueue.async {
+                self.isPlaybackScheduled = false
+                self.scheduleNextPlaybackBuffer(playerNode: playerNode)
+            }
         }
     }
     
@@ -538,8 +563,12 @@ class RealtimeCallService: NSObject, ObservableObject {
         let audioSession = AVAudioSession.sharedInstance()
         do {
             // PlayAndRecord is required for full-duplex
-            try audioSession.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP, .defaultToSpeaker])
+            // .defaultToSpeaker ensures audio plays from speaker, not earpiece
+            // .mixWithOthers allows both mic and speaker to work simultaneously
+            try audioSession.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP, .defaultToSpeaker, .mixWithOthers])
             try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
+            // Force audio to play through speaker (not earpiece)
+            try audioSession.overrideOutputAudioPort(.speaker)
         } catch {
             logger("Failed to set audio session: \(error)")
             errorMessage = "麦克风初始化失败"
@@ -696,15 +725,15 @@ class RealtimeCallService: NSObject, ObservableObject {
     // MARK: - Audio Playback (Streaming)
     
     private func setupAudioPlayback() {
-        // Create playback engine
-        if audioEngineP == nil {
-            audioEngineP = AVAudioEngine()
-        }
+        // Use the existing audioEngine (same one used for mic capture)
+        // Attach player node to it for playback
+        let engine = audioEngine
         
-        guard let engine = audioEngineP else { return }
-        
-        // If already setup, just connect
-        if audioPlayerNode != nil, engine.isRunning {
+        // If already setup, just ensure it's playing
+        if let playerNode = audioPlayerNode, engine.isRunning {
+            if !playerNode.isPlaying {
+                playerNode.play()
+            }
             return
         }
         
@@ -719,24 +748,30 @@ class RealtimeCallService: NSObject, ObservableObject {
                                    interleaved: false)!
         playbackFormat = format
         
+        // Connect player -> mainMixer so output goes to speaker
         engine.connect(playerNode, to: engine.mainMixerNode, format: format)
-        engine.prepare()
         
-        do {
-            try engine.start()
-            playerNode.play()
-            logger("Audio playback started")
-        } catch {
-            logger("Failed to start playback engine: \(error)")
+        // Ensure the engine is running
+        if !engine.isRunning {
+            engine.prepare()
+            do {
+                try engine.start()
+            } catch {
+                logger("Failed to start audio engine for playback: \(error)")
+                return
+            }
         }
+        
+        playerNode.play()
+        logger("Audio playback started (single engine)")
     }
     
     private func stopAudioPlayback() {
         audioPlayerNode?.stop()
-        audioEngineP?.stop()
         audioPlayerNode = nil
-        audioEngineP = nil
         playbackFormat = nil
+        pendingBuffers.removeAll()
+        isPlaybackScheduled = false
     }
     
     // MARK: - Helpers
