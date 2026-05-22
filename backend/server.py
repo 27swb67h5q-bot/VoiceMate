@@ -1167,6 +1167,10 @@ _load_clone_db()
 # WebRTC VAD configuration
 import webrtcvad
 VAD_FRAME_MS = 30           # webrtcvad requires 10/20/30ms frames; 30ms = 480 bytes at 16kHz 16-bit
+VAD_NOISE_FLOOR_DECAY = 0.95     # leaky integrator decay for tracking noise floor: 0.95 = slow adaptation (〜20 frames to rise)
+VAD_NOISE_FLOOR_INIT = 50.0      # initial noise floor estimate (RMS)
+VAD_SPEECH_RATIO = 2.5           # frame is speech if RMS >= noise_floor * VAD_SPEECH_RATIO (adaptive threshold)
+VAD_FLOOR_MIN = 20.0             # minimum noise floor to prevent division issues in very quiet environments
 SILENCE_DURATION_MS = 1000  # ms of silence before considering utterance complete (increased to 1s to avoid cutting off user thinking pauses)
 MIN_UTTERANCE_MS = 500     # minimum utterance length to process (ms)
 SAMPLE_RATE = 16000        # iOS sends 16kHz PCM16 mono
@@ -1273,6 +1277,7 @@ async def ws_voice_realtime(websocket: WebSocket):
     
     # VAD state (WebRTC VAD)
     vad = webrtcvad.Vad(mode=2)
+    noise_floor = VAD_NOISE_FLOOR_INIT  # adaptive noise floor estimate (decays toward silence RMS)
     vad_buffer = bytearray()        # PCM buffer to accumulate VAD frame (480 bytes for 30ms @ 16kHz)
     silence_frames = 0              # consecutive silent frames
     speech_confirm_frames = 0   # consecutive speech frames needed to start utterance (require >= 4)
@@ -1454,9 +1459,25 @@ async def ws_voice_realtime(websocket: WebSocket):
                 while len(vad_buffer) >= vad_frame_size:
                     frame = bytes(vad_buffer[:vad_frame_size])
                     vad_buffer = bytearray(vad_buffer[vad_frame_size:])
-                    
-                    is_speech = vad.is_speech(frame, SAMPLE_RATE)
-                    
+
+                    # ── Adaptive RMS energy pre-filter ──
+                    # Track a noise floor with a leaky integrator (only during silence)
+                    # and treat frames below noise_floor * VAD_SPEECH_RATIO as silence.
+                    # This adapts to fans, HVAC, and other constant background noise
+                    # while still allowing real speech to pass through to webrtcvad.
+                    samples = struct.unpack_from(f"<{vad_frame_size // BYTES_PER_SAMPLE}h", frame)
+                    rms = math.sqrt(sum(s * s for s in samples) / len(samples))
+                    if rms < noise_floor * VAD_SPEECH_RATIO:
+                        is_speech = False
+                    else:
+                        is_speech = vad.is_speech(frame, SAMPLE_RATE)
+
+                    # Update noise floor during confirmed silence
+                    if not utterance_active and not is_speech and rms < noise_floor:
+                        # Leaky integrator: gradually decay toward quieter RMS
+                        noise_floor = noise_floor * VAD_NOISE_FLOOR_DECAY + rms * (1 - VAD_NOISE_FLOOR_DECAY)
+                        noise_floor = max(noise_floor, VAD_FLOOR_MIN)
+
                     # Compute actual duration of this frame (in ms)
                     chunk_duration_ms = float(VAD_FRAME_MS)
                     
