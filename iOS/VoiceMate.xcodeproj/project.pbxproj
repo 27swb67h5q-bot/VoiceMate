@@ -1,453 +1,264 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>archiveVersion</key>
-	<integer>1</integer>
-	<key>classes</key>
-	<dict/>
-	<key>objectVersion</key>
-	<integer>56</integer>
-	<key>objects</key>
-	<dict>
-		<key>13UW7p0btYzV90ZJGB59KdGD</key>
-		<dict>
-			<key>buildActionMask</key>
-			<integer>2147483647</integer>
-			<key>files</key>
-			<array/>
-			<key>isa</key>
-			<string>PBXResourcesBuildPhase</string>
-			<key>runOnlyForDeploymentPostprocessing</key>
-			<integer>0</integer>
-		</dict>
-		<key>3ETjHnMWT7cuiQeKpcSjrXFZ</key>
-		<dict>
-			<key>isa</key>
-			<string>PBXBuildFile</string>
-			<key>productRef</key>
-			<string>VOfSHDN7cYLw1BJDpQ33TRrQ</string>
-		</dict>
-		<key>3s2S3Lb4cdVQGPjQbHGlRDap</key>
-		<dict>
-			<key>fileRef</key>
-			<string>qa3TULy8kKozfypW9fhTEmiO</string>
-			<key>isa</key>
-			<string>PBXBuildFile</string>
-		</dict>
-		<key>6aJSzkCSi7I2BWB1XUyEW3hP</key>
-		<dict>
-			<key>explicitFileType</key>
-			<string>wrapper.application</string>
-			<key>isa</key>
-			<string>PBXFileReference</string>
-			<key>path</key>
-			<string>VoiceMate.app</string>
-			<key>sourceTree</key>
-			<string>BUILT_PRODUCTS_DIR</string>
-		</dict>
-		<key>6e1WiEsIFdFjbIlRmsfJPjyd</key>
-		<dict>
-			<key>explicitFileType</key>
-			<string>sourcecode.swift.swift</string>
-			<key>isa</key>
-			<string>PBXFileReference</string>
-			<key>path</key>
-			<string>VoiceMate/Views/ContentView.swift</string>
-			<key>sourceTree</key>
-			<string>SOURCE_ROOT</string>
-		</dict>
-		<key>D0QFtp67GGjwyzWdyIvximmt</key>
-		<dict>
-			<key>explicitFileType</key>
-			<string>sourcecode.swift.swift</string>
-			<key>isa</key>
-			<string>PBXFileReference</string>
-			<key>path</key>
-			<string>VoiceMate/VoiceMateApp.swift</string>
-			<key>sourceTree</key>
-			<string>SOURCE_ROOT</string>
-		</dict>
-		<key>E2DdaZYgXNXfXeso1isLm0Vd</key>
-		<dict>
-			<key>buildSettings</key>
-			<dict>
-				<key>ASSETCATALOG_COMPILER_APPICON_NAME</key>
-				<string>AppIcon</string>
-				<key>CODE_SIGNING_ALLOWED</key>
-				<string>NO</string>
-				<key>CODE_SIGNING_REQUIRED</key>
-				<string>NO</string>
-				<key>CODE_SIGN_IDENTITY</key>
-				<string></string>
-				<key>CODE_SIGN_STYLE</key>
-				<string>Manual</string>
-				<key>INFOPLIST_FILE</key>
-				<string>VoiceMate/Resources/Info.plist</string>
-				<key>IPHONEOS_DEPLOYMENT_TARGET</key>
-				<string>16.0</string>
-				<key>PRODUCT_BUNDLE_IDENTIFIER</key>
-				<string>com.voicemate.app</string>
-				<key>PRODUCT_NAME</key>
-				<string>VoiceMate</string>
-				<key>SWIFT_VERSION</key>
-				<string>5.9</string>
-				<key>TARGETED_DEVICE_FAMILY</key>
-				<string>1</string>
-			</dict>
-			<key>isa</key>
-			<string>XCBuildConfiguration</string>
-			<key>name</key>
-			<string>Release</string>
-		</dict>
-		<key>FbbtPK3OUvL3cOo7eKxd7Whi</key>
-		<dict>
-			<key>explicitFileType</key>
-			<string>sourcecode.swift.swift</string>
-			<key>isa</key>
-			<string>PBXFileReference</string>
-			<key>path</key>
-			<string>VoiceMate/Services/RealtimeCallService.swift</string>
-			<key>sourceTree</key>
-			<string>SOURCE_ROOT</string>
-		</dict>
-		<key>FqIR0Mlm73y6imK6qGEaNqql</key>
-		<dict>
-			<key>children</key>
-			<array>
-				<string>D0QFtp67GGjwyzWdyIvximmt</string>
-				<string>FbbtPK3OUvL3cOo7eKxd7Whi</string>
-				<string>JYIiru0rNeqnfG0rX6SYXsnh</string>
-				<string>GFAMnXTnt7vCclwNDiibrmPD</string>
-				<string>IrIg0eEvUlW3houWMa6cKzHc</string>
-				<string>Fvg6Kk2fLJgGC1JfEJHLuRkJ</string>
-				<string>qa3TULy8kKozfypW9fhTEmiO</string>
-				<string>6e1WiEsIFdFjbIlRmsfJPjyd</string>
-				<string>mmgLIMbtdK2W1AgYb7NX7xnD</string>
-				<string>RB8fh6HTOoTZuUgjHKGRDYwi</string>
-				<string>hMRmXYgeNOFYjZvaIUL2a4WA</string>
-				<string>6aJSzkCSi7I2BWB1XUyEW3hP</string>
-			</array>
-			<key>isa</key>
-			<string>PBXGroup</string>
-			<key>sourceTree</key>
-			<string>&lt;group&gt;</string>
-		</dict>
-		<key>Fvg6Kk2fLJgGC1JfEJHLuRkJ</key>
-		<dict>
-			<key>explicitFileType</key>
-			<string>sourcecode.swift.swift</string>
-			<key>isa</key>
-			<string>PBXFileReference</string>
-			<key>path</key>
-			<string>VoiceMate/Services/VoiceMateService.swift</string>
-			<key>sourceTree</key>
-			<string>SOURCE_ROOT</string>
-		</dict>
-		<key>GFAMnXTnt7vCclwNDiibrmPD</key>
-		<dict>
-			<key>explicitFileType</key>
-			<string>sourcecode.swift.swift</string>
-			<key>isa</key>
-			<string>PBXFileReference</string>
-			<key>path</key>
-			<string>VoiceMate/Services/LiveKitCallService.swift</string>
-			<key>sourceTree</key>
-			<string>SOURCE_ROOT</string>
-		</dict>
-		<key>GTpe5B410R9bb0WJFom6Q8hk</key>
-		<dict>
-			<key>buildConfigurations</key>
-			<array>
-				<string>f8OMCXsJUnqVWUrWI9kRNvtA</string>
-				<string>E2DdaZYgXNXfXeso1isLm0Vd</string>
-			</array>
-			<key>defaultConfigurationIsVisible</key>
-			<integer>0</integer>
-			<key>defaultConfigurationName</key>
-			<string>Release</string>
-			<key>isa</key>
-			<string>XCConfigurationList</string>
-		</dict>
-		<key>IrIg0eEvUlW3houWMa6cKzHc</key>
-		<dict>
-			<key>explicitFileType</key>
-			<string>sourcecode.swift.swift</string>
-			<key>isa</key>
-			<string>PBXFileReference</string>
-			<key>path</key>
-			<string>VoiceMate/Services/AudioService.swift</string>
-			<key>sourceTree</key>
-			<string>SOURCE_ROOT</string>
-		</dict>
-		<key>JYIiru0rNeqnfG0rX6SYXsnh</key>
-		<dict>
-			<key>explicitFileType</key>
-			<string>sourcecode.swift.swift</string>
-			<key>isa</key>
-			<string>PBXFileReference</string>
-			<key>path</key>
-			<string>VoiceMate/Services/AudioCache.swift</string>
-			<key>sourceTree</key>
-			<string>SOURCE_ROOT</string>
-		</dict>
-		<key>L8oQdQxiaMBzjqKZXym9cVfb</key>
-		<dict>
-			<key>buildActionMask</key>
-			<integer>2147483647</integer>
-			<key>files</key>
-			<array>
-				<string>3ETjHnMWT7cuiQeKpcSjrXFZ</string>
-			</array>
-			<key>isa</key>
-			<string>PBXFrameworksBuildPhase</string>
-			<key>runOnlyForDeploymentPostprocessing</key>
-			<integer>0</integer>
-		</dict>
-		<key>P5TJOOBE0gDsJHeFrXf00XF1</key>
-		<dict>
-			<key>fileRef</key>
-			<string>JYIiru0rNeqnfG0rX6SYXsnh</string>
-			<key>isa</key>
-			<string>PBXBuildFile</string>
-		</dict>
-		<key>QjoDDOzRKaH3TtXqdhFhQzqB</key>
-		<dict>
-			<key>fileRef</key>
-			<string>IrIg0eEvUlW3houWMa6cKzHc</string>
-			<key>isa</key>
-			<string>PBXBuildFile</string>
-		</dict>
-		<key>RB8fh6HTOoTZuUgjHKGRDYwi</key>
-		<dict>
-			<key>explicitFileType</key>
-			<string>sourcecode.swift.swift</string>
-			<key>isa</key>
-			<string>PBXFileReference</string>
-			<key>path</key>
-			<string>VoiceMate/Models/ChatMessage.swift</string>
-			<key>sourceTree</key>
-			<string>SOURCE_ROOT</string>
-		</dict>
-		<key>TjOcoz4CaaY0SlzeZsfzb7Q5</key>
-		<dict>
-			<key>isa</key>
-			<string>XCRemoteSwiftPackageReference</string>
-			<key>repositoryURL</key>
-			<string>https://github.com/livekit/client-sdk-swift.git</string>
-			<key>requirement</key>
-			<dict>
-				<key>kind</key>
-				<string>upToNextMajorVersion</string>
-				<key>minimumVersion</key>
-				<string>2.0.0</string>
-			</dict>
-		</dict>
-		<key>UkvdTwqh0IX6AGGN5zG2kxv9</key>
-		<dict>
-			<key>fileRef</key>
-			<string>6e1WiEsIFdFjbIlRmsfJPjyd</string>
-			<key>isa</key>
-			<string>PBXBuildFile</string>
-		</dict>
-		<key>VOfSHDN7cYLw1BJDpQ33TRrQ</key>
-		<dict>
-			<key>isa</key>
-			<string>XCSwiftPackageProductDependency</string>
-			<key>package</key>
-			<string>TjOcoz4CaaY0SlzeZsfzb7Q5</string>
-			<key>productName</key>
-			<string>LiveKit</string>
-		</dict>
-		<key>ak4ZEBTQ32WLFiGz5RvVdwMy</key>
-		<dict>
-			<key>fileRef</key>
-			<string>mmgLIMbtdK2W1AgYb7NX7xnD</string>
-			<key>isa</key>
-			<string>PBXBuildFile</string>
-		</dict>
-		<key>f8OMCXsJUnqVWUrWI9kRNvtA</key>
-		<dict>
-			<key>buildSettings</key>
-			<dict>
-				<key>ASSETCATALOG_COMPILER_APPICON_NAME</key>
-				<string>AppIcon</string>
-				<key>CODE_SIGNING_ALLOWED</key>
-				<string>NO</string>
-				<key>CODE_SIGNING_REQUIRED</key>
-				<string>NO</string>
-				<key>CODE_SIGN_IDENTITY</key>
-				<string></string>
-				<key>CODE_SIGN_STYLE</key>
-				<string>Manual</string>
-				<key>INFOPLIST_FILE</key>
-				<string>VoiceMate/Resources/Info.plist</string>
-				<key>IPHONEOS_DEPLOYMENT_TARGET</key>
-				<string>16.0</string>
-				<key>PRODUCT_BUNDLE_IDENTIFIER</key>
-				<string>com.voicemate.app</string>
-				<key>PRODUCT_NAME</key>
-				<string>VoiceMate</string>
-				<key>SWIFT_VERSION</key>
-				<string>5.9</string>
-				<key>TARGETED_DEVICE_FAMILY</key>
-				<string>1</string>
-			</dict>
-			<key>isa</key>
-			<string>XCBuildConfiguration</string>
-			<key>name</key>
-			<string>Debug</string>
-		</dict>
-		<key>hMRmXYgeNOFYjZvaIUL2a4WA</key>
-		<dict>
-			<key>isa</key>
-			<string>PBXFileReference</string>
-			<key>path</key>
-			<string>VoiceMate/Resources/Info.plist</string>
-			<key>sourceTree</key>
-			<string>&lt;group&gt;</string>
-		</dict>
-		<key>ifFQyl4J8dnaWaJeHRpuhvf0</key>
-		<dict>
-			<key>fileRef</key>
-			<string>FbbtPK3OUvL3cOo7eKxd7Whi</string>
-			<key>isa</key>
-			<string>PBXBuildFile</string>
-		</dict>
-		<key>jMqJZlY0L72YG0TC1S10XmLC</key>
-		<dict>
-			<key>fileRef</key>
-			<string>D0QFtp67GGjwyzWdyIvximmt</string>
-			<key>isa</key>
-			<string>PBXBuildFile</string>
-		</dict>
-		<key>lARGhGQKo2sSy6SubzrkhXEU</key>
-		<dict>
-			<key>fileRef</key>
-			<string>RB8fh6HTOoTZuUgjHKGRDYwi</string>
-			<key>isa</key>
-			<string>PBXBuildFile</string>
-		</dict>
-		<key>mmgLIMbtdK2W1AgYb7NX7xnD</key>
-		<dict>
-			<key>explicitFileType</key>
-			<string>sourcecode.swift.swift</string>
-			<key>isa</key>
-			<string>PBXFileReference</string>
-			<key>path</key>
-			<string>VoiceMate/Views/VoiceCloneView.swift</string>
-			<key>sourceTree</key>
-			<string>SOURCE_ROOT</string>
-		</dict>
-		<key>pA4Zb5If3g2GgKMhI3UOuRYh</key>
-		<dict>
-			<key>buildConfigurationList</key>
-			<string>GTpe5B410R9bb0WJFom6Q8hk</string>
-			<key>compatibilityVersion</key>
-			<string>Xcode 14.0</string>
-			<key>developmentRegion</key>
-			<string>zh-Hans</string>
-			<key>hasScannedForEncodings</key>
-			<integer>0</integer>
-			<key>isa</key>
-			<string>PBXProject</string>
-			<key>knownRegions</key>
-			<array>
-				<string>zh-Hans</string>
-				<string>en</string>
-				<string>Base</string>
-			</array>
-			<key>mainGroup</key>
-			<string>FqIR0Mlm73y6imK6qGEaNqql</string>
-			<key>packageReferences</key>
-			<array>
-				<string>TjOcoz4CaaY0SlzeZsfzb7Q5</string>
-			</array>
-			<key>productRefGroup</key>
-			<string>FqIR0Mlm73y6imK6qGEaNqql</string>
-			<key>projectDirPath</key>
-			<string></string>
-			<key>projectRoot</key>
-			<string></string>
-			<key>targets</key>
-			<array>
-				<string>piHgyOdYnVuMfKhaU5Sd8WqA</string>
-			</array>
-		</dict>
-		<key>piHgyOdYnVuMfKhaU5Sd8WqA</key>
-		<dict>
-			<key>buildConfigurationList</key>
-			<string>GTpe5B410R9bb0WJFom6Q8hk</string>
-			<key>buildPhases</key>
-			<array>
-				<string>sSB4wE28BH5hy0KIJvryv7Nh</string>
-				<string>L8oQdQxiaMBzjqKZXym9cVfb</string>
-				<string>13UW7p0btYzV90ZJGB59KdGD</string>
-			</array>
-			<key>buildRules</key>
-			<array/>
-			<key>dependencies</key>
-			<array/>
-			<key>isa</key>
-			<string>PBXNativeTarget</string>
-			<key>name</key>
-			<string>VoiceMate</string>
-			<key>productName</key>
-			<string>VoiceMate</string>
-			<key>productReference</key>
-			<string>6aJSzkCSi7I2BWB1XUyEW3hP</string>
-			<key>productType</key>
-			<string>com.apple.product-type.application</string>
-		</dict>
-		<key>qa3TULy8kKozfypW9fhTEmiO</key>
-		<dict>
-			<key>explicitFileType</key>
-			<string>sourcecode.swift.swift</string>
-			<key>isa</key>
-			<string>PBXFileReference</string>
-			<key>path</key>
-			<string>VoiceMate/Views/RealtimeCallView.swift</string>
-			<key>sourceTree</key>
-			<string>SOURCE_ROOT</string>
-		</dict>
-		<key>sSB4wE28BH5hy0KIJvryv7Nh</key>
-		<dict>
-			<key>buildActionMask</key>
-			<integer>2147483647</integer>
-			<key>files</key>
-			<array>
-				<string>jMqJZlY0L72YG0TC1S10XmLC</string>
-				<string>ifFQyl4J8dnaWaJeHRpuhvf0</string>
-				<string>P5TJOOBE0gDsJHeFrXf00XF1</string>
-				<string>yZKGAK5ZoCkzsC7msIiuwRy6</string>
-				<string>QjoDDOzRKaH3TtXqdhFhQzqB</string>
-				<string>yCl1aH6eeXbB1zPJPybssjdt</string>
-				<string>3s2S3Lb4cdVQGPjQbHGlRDap</string>
-				<string>UkvdTwqh0IX6AGGN5zG2kxv9</string>
-				<string>ak4ZEBTQ32WLFiGz5RvVdwMy</string>
-				<string>lARGhGQKo2sSy6SubzrkhXEU</string>
-			</array>
-			<key>isa</key>
-			<string>PBXSourcesBuildPhase</string>
-			<key>runOnlyForDeploymentPostprocessing</key>
-			<integer>0</integer>
-		</dict>
-		<key>yCl1aH6eeXbB1zPJPybssjdt</key>
-		<dict>
-			<key>fileRef</key>
-			<string>Fvg6Kk2fLJgGC1JfEJHLuRkJ</string>
-			<key>isa</key>
-			<string>PBXBuildFile</string>
-		</dict>
-		<key>yZKGAK5ZoCkzsC7msIiuwRy6</key>
-		<dict>
-			<key>fileRef</key>
-			<string>GFAMnXTnt7vCclwNDiibrmPD</string>
-			<key>isa</key>
-			<string>PBXBuildFile</string>
-		</dict>
-	</dict>
-	<key>rootObject</key>
-	<string>pA4Zb5If3g2GgKMhI3UOuRYh</string>
-</dict>
-</plist>
+// !UTF8*
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+		4VDNO9CV3HUTG0QH4Q8OJTRB = {
+			isa = PBXFileReference;
+			lastKnownFileType = sourcecode.swift.swift;
+			path = "VoiceMate/VoiceMateApp.swift";
+			sourceTree = "<group>";
+		};
+		BN98II7W7WY35X336GS1BKVU = {
+			isa = PBXBuildFile;
+			fileRef = 4VDNO9CV3HUTG0QH4Q8OJTRB;
+		};
+		1UVP6QSDD8CYBW1P8EXEIV80 = {
+			isa = PBXFileReference;
+			lastKnownFileType = sourcecode.swift.swift;
+			path = "VoiceMate/Services/AudioCache.swift";
+			sourceTree = "<group>";
+		};
+		H09LJ0JUP9B53K2JWHAGP0NR = {
+			isa = PBXBuildFile;
+			fileRef = 1UVP6QSDD8CYBW1P8EXEIV80;
+		};
+		ONDHYB2KKXLOZJEMS4YFDCON = {
+			isa = PBXFileReference;
+			lastKnownFileType = sourcecode.swift.swift;
+			path = "VoiceMate/Services/AudioService.swift";
+			sourceTree = "<group>";
+		};
+		LB5B0X4CISCUVISIBNAXTN1G = {
+			isa = PBXBuildFile;
+			fileRef = ONDHYB2KKXLOZJEMS4YFDCON;
+		};
+		VNVCMW620409DBXFDEJHUPSW = {
+			isa = PBXFileReference;
+			lastKnownFileType = sourcecode.swift.swift;
+			path = "VoiceMate/Services/LiveKitCallService.swift";
+			sourceTree = "<group>";
+		};
+		KHWK6CX3WLJJ7IOWU2PI1NG1 = {
+			isa = PBXBuildFile;
+			fileRef = VNVCMW620409DBXFDEJHUPSW;
+		};
+		AHMA36FF31D0V68XPJ023LGD = {
+			isa = PBXFileReference;
+			lastKnownFileType = sourcecode.swift.swift;
+			path = "VoiceMate/Services/RealtimeCallService.swift";
+			sourceTree = "<group>";
+		};
+		ONOB905NH6G9JL5P3J6Z2ZHM = {
+			isa = PBXBuildFile;
+			fileRef = AHMA36FF31D0V68XPJ023LGD;
+		};
+		C4IP6BDZGL9WUYCGKGVI7BGV = {
+			isa = PBXFileReference;
+			lastKnownFileType = sourcecode.swift.swift;
+			path = "VoiceMate/Services/VoiceMateService.swift";
+			sourceTree = "<group>";
+		};
+		22U2VDTIXUBHV9MDIFIXGP68 = {
+			isa = PBXBuildFile;
+			fileRef = C4IP6BDZGL9WUYCGKGVI7BGV;
+		};
+		AW16IVL1Y528MNMCOL2FOKQC = {
+			isa = PBXFileReference;
+			lastKnownFileType = sourcecode.swift.swift;
+			path = "VoiceMate/Views/ContentView.swift";
+			sourceTree = "<group>";
+		};
+		46XQ0H03QQ3FMWGVOW0VVE2I = {
+			isa = PBXBuildFile;
+			fileRef = AW16IVL1Y528MNMCOL2FOKQC;
+		};
+		9DU3FGOG5WFC5DTHNZ6E9VPP = {
+			isa = PBXFileReference;
+			lastKnownFileType = sourcecode.swift.swift;
+			path = "VoiceMate/Views/RealtimeCallView.swift";
+			sourceTree = "<group>";
+		};
+		573T1781W4B4NL5KIM3FSV0X = {
+			isa = PBXBuildFile;
+			fileRef = 9DU3FGOG5WFC5DTHNZ6E9VPP;
+		};
+		FMYBA3P5OOTDOMI6OWEWD8MF = {
+			isa = PBXFileReference;
+			lastKnownFileType = sourcecode.swift.swift;
+			path = "VoiceMate/Views/VoiceCloneView.swift";
+			sourceTree = "<group>";
+		};
+		ECJM05GLM8MXFWT0FN8Y3AR6 = {
+			isa = PBXBuildFile;
+			fileRef = FMYBA3P5OOTDOMI6OWEWD8MF;
+		};
+		T4APZJCSGQEZQ6USDUAQNV7G = {
+			isa = PBXFileReference;
+			lastKnownFileType = sourcecode.swift.swift;
+			path = "VoiceMate/Models/ChatMessage.swift";
+			sourceTree = "<group>";
+		};
+		NZMRDKCX34UAF5LNN1MO87UB = {
+			isa = PBXBuildFile;
+			fileRef = T4APZJCSGQEZQ6USDUAQNV7G;
+		};
+		P3JH3BKVX6IX22Q10IHW1X62 = {
+			isa = PBXFileReference;
+			lastKnownFileType = text.plist.xml;
+			path = "VoiceMate/Resources/Info.plist";
+			sourceTree = "<group>";
+		};
+		7O6AV1OC5INPJUBF12YVQCW2 = {
+			isa = PBXFileReference;
+			lastKnownFileType = folder.assetcatalog;
+			path = "VoiceMate/Resources/Assets.xcassets";
+			sourceTree = "<group>";
+		};
+		R6GWZL8BS7HMQOD1CF8F77AQ = {
+			isa = PBXFileReference;
+			explicitFileType = wrapper.application;
+			path = VoiceMate.app;
+			sourceTree = BUILT_PRODUCTS_DIR;
+		};
+		J1B9CYHDUMD6XJEGCPJGOIBA = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/livekit/client-sdk-swift.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.0.0;
+			};
+		};
+		IK8BMH966I7MXPJFIPH4OK2D = {
+			isa = XCSwiftPackageProductDependency;
+			package = J1B9CYHDUMD6XJEGCPJGOIBA;
+			productName = LiveKit;
+		};
+		IOCZN5CV3OX1HPIXDGR9VPX9 = {
+			isa = PBXBuildFile;
+			productRef = IK8BMH966I7MXPJFIPH4OK2D;
+		};
+		GM6CPCR1IX88ROIQ64OFKDRY = {
+			isa = PBXGroup;
+			children = (4VDNO9CV3HUTG0QH4Q8OJTRB, 1UVP6QSDD8CYBW1P8EXEIV80, ONDHYB2KKXLOZJEMS4YFDCON, VNVCMW620409DBXFDEJHUPSW, AHMA36FF31D0V68XPJ023LGD, C4IP6BDZGL9WUYCGKGVI7BGV, AW16IVL1Y528MNMCOL2FOKQC, 9DU3FGOG5WFC5DTHNZ6E9VPP, FMYBA3P5OOTDOMI6OWEWD8MF, T4APZJCSGQEZQ6USDUAQNV7G, P3JH3BKVX6IX22Q10IHW1X62, 7O6AV1OC5INPJUBF12YVQCW2, R6GWZL8BS7HMQOD1CF8F77AQ);
+			name = VoiceMate;
+			sourceTree = "<group>";
+		};
+		FK0FFTA2CR16DAGWEVLT3KQ9 = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BN98II7W7WY35X336GS1BKVU /* VoiceMateApp.swift in Sources */,
+				H09LJ0JUP9B53K2JWHAGP0NR /* AudioCache.swift in Sources */,
+				LB5B0X4CISCUVISIBNAXTN1G /* AudioService.swift in Sources */,
+				KHWK6CX3WLJJ7IOWU2PI1NG1 /* LiveKitCallService.swift in Sources */,
+				ONOB905NH6G9JL5P3J6Z2ZHM /* RealtimeCallService.swift in Sources */,
+				22U2VDTIXUBHV9MDIFIXGP68 /* VoiceMateService.swift in Sources */,
+				46XQ0H03QQ3FMWGVOW0VVE2I /* ContentView.swift in Sources */,
+				573T1781W4B4NL5KIM3FSV0X /* RealtimeCallView.swift in Sources */,
+				ECJM05GLM8MXFWT0FN8Y3AR6 /* VoiceCloneView.swift in Sources */,
+				NZMRDKCX34UAF5LNN1MO87UB /* ChatMessage.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		7WZW8EBMMNBN08EP9G442CVN = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				IOCZN5CV3OX1HPIXDGR9VPX9 /* LiveKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		DGTNVDVIUTQOXXG2K24DSI9W = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		Z8DBYNJGM9GUCSH24ZVEKMZ6 = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = ZG59303MSX5S9VY2D4TPGS87;
+			buildPhases = (
+				FK0FFTA2CR16DAGWEVLT3KQ9,
+				7WZW8EBMMNBN08EP9G442CVN,
+				DGTNVDVIUTQOXXG2K24DSI9W,
+			);
+			buildRules = ();
+			dependencies = ();
+			name = VoiceMate;
+			productName = VoiceMate;
+			productReference = R6GWZL8BS7HMQOD1CF8F77AQ;
+			productType = "com.apple.product-type.application";
+		};
+		FS7I3U68X0AWDYJ3P7V4TNCE = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Manual;
+				CODE_SIGN_IDENTITY = "";
+				CODE_SIGNING_REQUIRED = NO;
+				CODE_SIGNING_ALLOWED = NO;
+				INFOPLIST_FILE = "VoiceMate/Resources/Info.plist";
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.voicemate.app;
+				PRODUCT_NAME = VoiceMate;
+				SWIFT_VERSION = 5.9;
+				TARGETED_DEVICE_FAMILY = 1;
+				DEVELOPMENT_TEAM = "";
+			};
+			name = Debug;
+		};
+		T9201S3TZJQIKDT18M4BP82N = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Manual;
+				CODE_SIGN_IDENTITY = "";
+				CODE_SIGNING_REQUIRED = NO;
+				CODE_SIGNING_ALLOWED = NO;
+				INFOPLIST_FILE = "VoiceMate/Resources/Info.plist";
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.voicemate.app;
+				PRODUCT_NAME = VoiceMate;
+				SWIFT_VERSION = 5.9;
+				TARGETED_DEVICE_FAMILY = 1;
+				DEVELOPMENT_TEAM = "";
+			};
+			name = Release;
+		};
+		ZG59303MSX5S9VY2D4TPGS87 = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FS7I3U68X0AWDYJ3P7V4TNCE,
+				T9201S3TZJQIKDT18M4BP82N,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		7LB6O3M6754A5K9SX9OG0C5N = {
+			isa = PBXProject;
+			buildConfigurationList = ZG59303MSX5S9VY2D4TPGS87;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = "zh-Hans";
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				"zh-Hans",
+				en,
+				Base,
+			);
+			mainGroup = GM6CPCR1IX88ROIQ64OFKDRY;
+			packageReferences = (
+				J1B9CYHDUMD6XJEGCPJGOIBA,
+			);
+			productRefGroup = GM6CPCR1IX88ROIQ64OFKDRY;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				Z8DBYNJGM9GUCSH24ZVEKMZ6,
+			);
+		};
+	};
+	rootObject = 7LB6O3M6754A5K9SX9OG0C5N;
+}
