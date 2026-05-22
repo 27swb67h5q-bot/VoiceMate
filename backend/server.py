@@ -47,6 +47,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 
+from livekit.api import AccessToken, VideoGrants
 # ── Config ──────────────────────────────────────────────────────────────────
 
 HOST = os.environ.get("VOICEMATE_HOST", "0.0.0.0")
@@ -1685,6 +1686,47 @@ async def ws_voice_realtime(websocket: WebSocket):
         except Exception:
             pass
 
+
+
+# ── LiveKit Config ──────────────────────────────────────────────────────────────
+
+LIVEKIT_API_KEY = os.environ.get("LIVEKIT_API_KEY", "devkey")
+LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "secret")
+LIVEKIT_HOST = os.environ.get("LIVEKIT_HOST", "192.168.10.233")
+LIVEKIT_PORT = int(os.environ.get("LIVEKIT_PORT", "7880"))
+
+ROOM_NAME = "voicemate"
+
+
+# ── LiveKit Token Endpoint ──────────────────────────────────────────────────────
+
+@app.post("/v1/livekit/token")
+async def create_livekit_token():
+    """
+    Generate a LiveKit access token for joining the VoiceMate room.
+
+    No authentication required (testing phase).
+    Each request creates a unique identity to join the shared room.
+    """
+    identity = f"voicemate-{uuid.uuid4().hex[:12]}"
+
+    token = AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
+    token.identity = identity
+    token.ttl = datetime.timedelta(hours=2)
+    token.with_grants(VideoGrants(
+        room_join=True,
+        room=ROOM_NAME,
+        can_publish=True,
+        can_subscribe=True,
+        can_publish_data=True,
+    ))
+    jwt = token.to_jwt()
+
+    return {
+        "token": jwt,
+        "room": ROOM_NAME,
+        "url": f"ws://{LIVEKIT_HOST}:{LIVEKIT_PORT}",
+    }
 
 # ── Proactive Push Messages ──────────────────────────────────────────────────
 

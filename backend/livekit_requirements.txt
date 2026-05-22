@@ -1,0 +1,8 @@
+# VoiceMate LiveKit Agent Dependencies
+# Install: pip install -r livekit_requirements.txt
+livekit>=1.0.0
+livekit-agents>=0.9.0
+edge-tts>=7.0.0
+openai>=1.0.0
+webrtcvad>=2.0.10
+python-dotenv>=1.0.0

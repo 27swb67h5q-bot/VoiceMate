@@ -7,11 +7,14 @@ let package = Package(
         .iOS(.v16)
     ],
     dependencies: [
+        .package(url: "https://github.com/livekit/client-sdk-swift.git", from: "2.0.0"),
     ],
     targets: [
         .executableTarget(
             name: "VoiceMate",
-            dependencies: [],
+            dependencies: [
+                .product(name: "LiveKit", package: "client-sdk-swift"),
+            ],
             path: ".",
             exclude: ["Info.plist", "project.yml"],
             swiftSettings: [

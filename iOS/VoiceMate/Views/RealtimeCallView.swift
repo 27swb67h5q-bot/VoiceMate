@@ -1,9 +1,8 @@
 import SwiftUI
-import AVFoundation
 
-/// Simplified real-time voice call view.
+/// Simplified real-time voice call view using LiveKit.
 /// Clean phone-call style: avatar, status, duration, hang up button.
-/// ASR text and AI replies are silently sent to the main chat via onTurnCompleted.
+/// LiveKit handles all audio capture/playback/VAD — we just manage UI.
 struct RealtimeCallView: View {
     @Environment(\.dismiss) var dismiss
     
@@ -16,7 +15,7 @@ struct RealtimeCallView: View {
     let onTranscript: ([(isUser: Bool, text: String)]) -> Void
     let onTurnCompleted: (_ isUser: Bool, _ text: String) -> Void
     
-    @StateObject private var callService: RealtimeCallService
+    @StateObject private var callService: LiveKitCallService
     
     @State private var pulseScale: CGFloat = 1.0
     @State private var pulseOpacity: Double = 0.6
@@ -30,7 +29,7 @@ struct RealtimeCallView: View {
         self.onTranscript = onTranscript
         self.onTurnCompleted = onTurnCompleted
         
-        let service = RealtimeCallService(
+        let service = LiveKitCallService(
             serverHost: serverHost,
             serverPort: serverPort,
             voice: voice,
