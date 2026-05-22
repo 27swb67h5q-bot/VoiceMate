@@ -113,8 +113,8 @@ struct ContentView: View {
         .preferredColorScheme(.dark)
         // Recording overlay (WeChat style)
         .overlay(recordingOverlay)
-        // Tap background to dismiss keyboard
-        .onTapGesture { UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil) }
+        // Tap background to dismiss keyboard (won't block TextField interaction)
+        .background(DismissKeyboardOnTap())
         // Emotion animation overlay
         .overlay(emotionOverlay)
     }
@@ -967,6 +967,31 @@ struct SettingsView: View {
         }
         .onChange(of: selectedVoice) { newVoice in
             service.selectedVoice = newVoice
+        }
+    }
+}
+
+// MARK: - Dismiss Keyboard Helper
+
+/// A UIViewRepresentable that dismisses the keyboard when tapping on non-interactive areas.
+/// Unlike a SwiftUI .onTapGesture, this does not block TextField focus from working.
+private struct DismissKeyboardOnTap: UIViewRepresentable {
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.backgroundColor = .clear
+        let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.tap))
+        tap.cancelsTouchesInView = false
+        view.addGestureRecognizer(tap)
+        return view
+    }
+    
+    func updateUIView(_ uiView: UIView, context: Context) {}
+    
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    
+    class Coordinator: NSObject {
+        @objc func tap(_ gesture: UITapGestureRecognizer) {
+            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
         }
     }
 }

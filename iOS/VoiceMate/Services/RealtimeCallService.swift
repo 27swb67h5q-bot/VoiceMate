@@ -199,12 +199,12 @@ class RealtimeCallService: NSObject, ObservableObject {
             try audioSession.setCategory(
                 .playAndRecord,
                 mode: .voiceChat,
-                options: [.allowBluetoothHFP]
+                options: [.allowBluetoothHFP, .defaultToSpeaker]
             )
             try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
             // .voiceChat mode enables built-in AEC (Acoustic Echo Cancellation).
-            // Do NOT call overrideOutputAudioPort(.speaker) — that bypasses AEC
-            // optimizations. .voiceChat routes audio appropriately on its own.
+            // .defaultToSpeaker safely coexists with .voiceChat — AEC works at the
+            // mode level, not the port level. This routes audio to speaker while preserving AEC.
 
             // Detect voice isolation support (iOS 16.5+)
             supportsVoiceIsolation = audioSession.availableModes.contains(.voiceChat)
@@ -216,7 +216,7 @@ class RealtimeCallService: NSObject, ObservableObject {
             // Fallback: try with .default mode
             if let fallbackSession = try? AVAudioSession.sharedInstance() {
                 let fs = fallbackSession
-                try? fs.setCategory(.playAndRecord, mode: .default, options: [.allowBluetoothHFP])
+                try? fs.setCategory(.playAndRecord, mode: .default, options: [.allowBluetoothHFP, .defaultToSpeaker])
                 try? fs.setActive(true, options: .notifyOthersOnDeactivation)
             }
         }
@@ -232,8 +232,8 @@ class RealtimeCallService: NSObject, ObservableObject {
             object: AVAudioSession.sharedInstance(),
             queue: .main
         ) { [weak self] _ in
-            // No speaker override needed — .voiceChat mode handles routing,
-            // and calling overrideOutputAudioPort would bypass AEC.
+            // .defaultToSpeaker was set at category-config time and persists across
+            // route changes automatically — no need for overrideOutputAudioPort here.
             // The audio session is kept active, so AEC continues working
             // seamlessly across route changes.
             guard let self = self else { return }
@@ -801,9 +801,8 @@ class RealtimeCallService: NSObject, ObservableObject {
             // Prepare player node before engine start to init scheduler (iOS 16.x safety)
             playerNode.prepare(withFrameCount: 8820)
             try audioEngine.start()
-            // Do NOT call overrideOutputAudioPort(.speaker) after engine start.
-            // .voiceChat mode manages the audio route and provides built-in AEC;
-            // overriding the output port would disable AEC optimizations.
+            // overrideOutputAudioPort(.speaker) is NOT called here (would crash on a
+            // running engine). .defaultToSpeaker was set at category-config time above.
             isMicActive = true
             logger("Audio capture started (16kHz)")
         } catch {
