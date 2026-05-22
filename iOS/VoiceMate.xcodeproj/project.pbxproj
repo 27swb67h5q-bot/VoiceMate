@@ -226,6 +226,13 @@
 				TARGETED_DEVICE_FAMILY = 1;
 				DEVELOPMENT_TEAM = "";
 							ALWAYS_SEARCH_USER_PATHS = NO;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PLATFORM_DIR)/Developer/Library/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+				);
 };
 			name = Release;
 		};
