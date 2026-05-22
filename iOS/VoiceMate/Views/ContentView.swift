@@ -306,53 +306,52 @@ struct ContentView: View {
     // MARK: - Voice Recording Area
     
     private var voiceButtonArea: some View {
-        Button(action: {
-            // Tap → switch to text input mode (show keyboard)
-            withAnimation(.easeInOut(duration: 0.2)) {
-                inputMode = .text
-                // Auto-focus the text field after switching
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                    isTextFieldFocused = true
+        Text(audioService.isRecording ? "松开 发送" : "按住 说话")
+            .font(.body)
+            .fontWeight(.medium)
+            .foregroundColor(audioService.isRecording ? .white : .primary)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 22)
+                    .fill(audioService.isRecording ? Color.red : Color(.systemGray5))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 22)
+                    .stroke(audioService.isRecording ? Color.red.opacity(0.5) : Color.clear, lineWidth: 2)
+            )
+            .opacity(voiceService.isProcessing ? 0.5 : 1.0)
+            .allowsHitTesting(!voiceService.isProcessing)
+            .onTapGesture {
+                // Tap → switch to text input mode (show keyboard)
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    inputMode = .text
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                        isTextFieldFocused = true
+                    }
                 }
             }
-        }) {
-            Text(audioService.isRecording ? "松开 发送" : "按住 说话")
-                .font(.body)
-                .fontWeight(.medium)
-                .foregroundColor(audioService.isRecording ? .white : .primary)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 10)
-                .background(
-                    RoundedRectangle(cornerRadius: 22)
-                        .fill(audioService.isRecording ? Color.red : Color(.systemGray5))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 22)
-                        .stroke(audioService.isRecording ? Color.red.opacity(0.5) : Color.clear, lineWidth: 2)
-                )
-        }
-        .simultaneousGesture(
-            LongPressGesture(minimumDuration: 0.15)
-                .onEnded { _ in
-                    if !audioService.isRecording && !voiceService.isProcessing {
-                        audioService.startRecording()
-                        isPressingForRecording = true
-                        let impact = UIImpactFeedbackGenerator(style: .medium)
-                        impact.impactOccurred()
-                    }
-                }
-                .sequenced(before: DragGesture(minimumDistance: 0)
+            .simultaneousGesture(
+                LongPressGesture(minimumDuration: 0.15)
                     .onEnded { _ in
-                        if audioService.isRecording && isPressingForRecording {
-                            Task {
-                                await sendRecording()
-                                isPressingForRecording = false
-                            }
+                        if !audioService.isRecording && !voiceService.isProcessing {
+                            audioService.startRecording()
+                            isPressingForRecording = true
+                            let impact = UIImpactFeedbackGenerator(style: .medium)
+                            impact.impactOccurred()
                         }
                     }
-                )
-        )
-        .disabled(voiceService.isProcessing)
+                    .sequenced(before: DragGesture(minimumDistance: 0)
+                        .onEnded { _ in
+                            if audioService.isRecording && isPressingForRecording {
+                                Task {
+                                    await sendRecording()
+                                    isPressingForRecording = false
+                                }
+                            }
+                        }
+                    )
+            )
     }
     
     // MARK: - Recording Overlay (WeChat style)
