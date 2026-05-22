@@ -1290,13 +1290,23 @@ async def ws_voice_realtime(websocket: WebSocket):
     ai_speaking = False
     ai_speak_task = None
     
+    # Barge-in guard: require sustained speech before interrupting AI
+    # Prevents AI's own voice (echo from speaker) from causing false barge-in
+    BARGE_IN_CONFIRM_FRAMES = 8          # require 8 frames (240ms) of sustained speech during AI playback
+    BARGE_IN_COOLDOWN_FRAMES = 20        # 600ms cooldown after a rejected barge-in attempt
+    barge_in_speech_frames = 0           # consecutive speech frames detected during AI speaking
+    barge_in_silence_frames = 0          # consecutive silence during barge-in window
+    barge_in_cooldown = 0                # frames remaining in cooldown after rejected barge-in
+    
     # ASR service placeholder (uses external API; for now we simulate with a simple approach)
     # In production, replace with Deepgram / Azure / Aliyun real-time ASR
     
     logger.info(f"Full-duplex voice call started: {conv_id}, persona={persona}, voice={voice}")
     
     async def handle_barge_in():
-        """Handle user interruption during AI speech."""
+        """Handle user interruption during AI speech.
+        Uses a confirmation window to avoid false barge-in from AI echo or noise.
+        """
         nonlocal ai_speaking, ai_speak_task
         if ai_speaking:
             ai_speaking = False
@@ -1313,9 +1323,29 @@ async def ws_voice_realtime(websocket: WebSocket):
                 pass
             logger.info(f"AI speech interrupted by barge-in [{conv_id}]")
     
+    async def handle_barge_in_attempt():
+        """Check if barge-in should proceed, using confirmation window.
+        Returns True if barge-in actually happened, False if not yet confirmed.
+        """
+        nonlocal ai_speaking, barge_in_speech_frames, barge_in_silence_frames, barge_in_cooldown
+        if not ai_speaking:
+            return False
+        # During cooldown after rejected barge-in, don't even start counting
+        if barge_in_cooldown > 0:
+            return False
+        barge_in_speech_frames += 1
+        barge_in_silence_frames = 0
+        if barge_in_speech_frames >= BARGE_IN_CONFIRM_FRAMES:
+            # Speech sustained long enough — real barge-in
+            barge_in_speech_frames = 0
+            barge_in_cooldown = 0
+            await handle_barge_in()
+            return True
+        return False
+    
     async def process_utterance(utterance_bytes: bytes):
         """Process a complete user utterance: ASR -> LLM -> TTS stream."""
-        nonlocal ai_speaking, ai_speak_task
+        nonlocal ai_speaking, ai_speak_task, barge_in_speech_frames, barge_in_silence_frames, barge_in_cooldown
         
         utterance_len = len(utterance_bytes)
         min_bytes = MIN_UTTERANCE_MS * SAMPLE_RATE // 1000 * BYTES_PER_SAMPLE
@@ -1344,7 +1374,7 @@ async def ws_voice_realtime(websocket: WebSocket):
 
     async def ai_speak(ai_text: str):
         """Run LLM stream + TTS stream for AI response."""
-        nonlocal ai_speaking, ai_speak_task
+        nonlocal ai_speaking, ai_speak_task, barge_in_speech_frames, barge_in_silence_frames, barge_in_cooldown
 
         # Skip filler/thinking noises (e.g., "嗯", "um", "啊") - do not call LLM
         if _is_filler_text(ai_text):
@@ -1366,7 +1396,11 @@ async def ws_voice_realtime(websocket: WebSocket):
             await asyncio.sleep(0.1)
         
         async def _speak_task():
-            nonlocal ai_speaking
+            nonlocal ai_speaking, barge_in_speech_frames, barge_in_silence_frames, barge_in_cooldown
+            # Reset barge-in confirmation state when AI starts a new turn
+            barge_in_speech_frames = 0
+            barge_in_silence_frames = 0
+            barge_in_cooldown = 0
             try:
                 conv_history = history.load(conv_id)
                 full_reply = ""
@@ -1475,6 +1509,11 @@ async def ws_voice_realtime(websocket: WebSocket):
                         is_speech = False
                     else:
                         is_speech = vad.is_speech(frame, SAMPLE_RATE)
+                    
+                    # When AI is speaking, raise the energy threshold to reduce echo sensitivity
+                    effective_speech_ratio = VAD_SPEECH_RATIO * 1.5 if ai_speaking else VAD_SPEECH_RATIO
+                    if rms < noise_floor * effective_speech_ratio:
+                        is_speech = False
 
                     # Update noise floor during confirmed silence
                     if not utterance_active and not is_speech and rms < noise_floor:
@@ -1488,10 +1527,12 @@ async def ws_voice_realtime(websocket: WebSocket):
                     if is_speech:
                         if not utterance_active:
                             # Not yet in utterance: accumulate confirmation frames
+                            # Require more frames when AI is speaking (less sensitive to echo/noise)
+                            confirm_frames_needed = VAD_CONFIRM_FRAMES * 2 if ai_speaking else VAD_CONFIRM_FRAMES
                             speech_confirm_frames += 1
-                            if speech_confirm_frames >= VAD_CONFIRM_FRAMES:
+                            if speech_confirm_frames >= confirm_frames_needed:
                                 # Confirmed speech: start utterance
-                                logger.info(f"VAD: speech confirmed ({VAD_CONFIRM_FRAMES} frames) [{conv_id}]")
+                                logger.info(f"VAD: speech confirmed ({speech_confirm_frames} frames, ai_speaking={ai_speaking}) [{conv_id}]")
                                 utterance_active = True
                                 # Do NOT accumulate past frames into utterance_buffer;
                                 # those are already discarded. The next frame is the first
@@ -1517,8 +1558,23 @@ async def ws_voice_realtime(websocket: WebSocket):
                             # Utterance complete
                             logger.info(f"VAD: utterance end after {silence_duration_ms:.0f}ms silence, {len(utterance_buffer)}B [{conv_id}]")
                             if ai_speaking:
-                                # User started speaking while AI was talking -> barge-in
-                                await handle_barge_in()
+                                # AI was speaking when user utterance ended.
+                                # Use barge-in confirmation window to avoid false triggers
+                                # from AI's own echo through the speaker.
+                                utterance_len = len(utterance_buffer)
+                                # Require minimum speech duration for barge-in (roughly 300ms of PCM data)
+                                min_bargein_bytes = 300 * SAMPLE_RATE // 1000 * BYTES_PER_SAMPLE
+                                if utterance_len >= min_bargein_bytes:
+                                    logger.info(f"VAD barge-in confirmed ({utterance_len}B >= {min_bargein_bytes}B threshold) [{conv_id}]")
+                                    await handle_barge_in()
+                                else:
+                                    logger.info(f"VAD barge-in rejected: utterance too short ({utterance_len}B < {min_bargein_bytes}B, likely AI echo) [{conv_id}]")
+                                    # Don't barge-in, skip processing this utterance entirely
+                                    utterance_active = False
+                                    utterance_buffer = bytearray()
+                                    silence_frames = 0
+                                    silence_duration_ms = 0.0
+                                    continue
                             
                             # Process the utterance
                             await process_utterance(bytes(utterance_buffer))
@@ -1563,8 +1619,14 @@ async def ws_voice_realtime(websocket: WebSocket):
                 continue
             
             if command == "barge_in":
-                # Client detected user speech during AI playback
-                await handle_barge_in()
+                # Client detected user speech during AI playback.
+                # Server-side guard: only barge-in if AI is actually speaking
+                # (the client may send barge_in from echo/noise)
+                if ai_speaking:
+                    logger.info(f"Client barge_in received while AI speaking, using confirmation window [{conv_id}]")
+                    await handle_barge_in_attempt()
+                else:
+                    logger.info(f"Client barge_in received but AI not speaking, ignoring [{conv_id}]")
                 continue
             
             if command == "text":
