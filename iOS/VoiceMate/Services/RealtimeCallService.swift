@@ -69,8 +69,7 @@ class RealtimeCallService: NSObject, ObservableObject {
     /// Format: 16kHz mono PCM16
     private var recordingFormat: AVAudioFormat?
     
-    // MARK: - Audio Playback (Separate engine to avoid modifying a running engine graph)
-    private let playbackEngine = AVAudioEngine()
+    // MARK: - Audio Playback (Shared engine — playerNode attached to audioEngine)
     // MARK: - Audio Playback (Streaming)
     private var audioPlayerNode: AVAudioPlayerNode?
     /// Playback audio buffer queue — buffers arriving chunks while player is busy
@@ -163,9 +162,19 @@ class RealtimeCallService: NSObject, ObservableObject {
         isUserSpeaking = false
         isMicActive = false
         
+        // Stop capture first (stops the audio engine), then detach player node.
         stopAudioCapture()
         stopASR()
-        stopAudioPlayback()
+        
+        // Detach the player node so startAudioCapture can re-attach a fresh one.
+        if let node = audioPlayerNode {
+            audioEngine.detach(node)
+        }
+        audioPlayerNode = nil
+        playbackFormat = nil
+        pendingBuffers.removeAll()
+        isPlaybackScheduled = false
+        
         disconnectWebSocket()
         
         durationTimer?.invalidate()
@@ -537,7 +546,7 @@ class RealtimeCallService: NSObject, ObservableObject {
     
     /// Check if the playback engine is properly configured
     private func engineSupportsPlayback() -> Bool {
-        guard playbackEngine.isRunning else { return false }
+        guard audioEngine.isRunning else { return false }
         guard audioPlayerNode != nil else { return false }
         guard playbackFormat != nil else { return false }
         return true
@@ -614,6 +623,13 @@ class RealtimeCallService: NSObject, ObservableObject {
                 }
             }
         }
+        
+        // Pre-attach a player node for TTS playback (must be done before engine starts)
+        // so we don't need a separate playback engine (which would conflict on the same
+        // audio session output unit).
+        let playerNode = AVAudioPlayerNode()
+        audioPlayerNode = playerNode
+        audioEngine.attach(playerNode)
         
         audioEngine.prepare()
         do {
@@ -727,27 +743,17 @@ class RealtimeCallService: NSObject, ObservableObject {
     // MARK: - Audio Playback (Streaming)
     
     private func setupAudioPlayback() {
-        // Use a dedicated playback engine (separate from the mic capture engine)
-        // to avoid crashes caused by modifying a running AVAudioEngine graph.
-        let engine = playbackEngine
-        
-        // If already setup, just ensure it's playing
-        if let playerNode = audioPlayerNode {
-            if !playerNode.isPlaying { playerNode.play() }
+        guard let playerNode = audioPlayerNode else {
+            logger("setupAudioPlayback: playerNode not pre-attached")
             return
         }
         
-        // Detach any leftover nodes from previous sessions
-        if let oldNode = audioPlayerNode {
-            engine.detach(oldNode)
-            audioPlayerNode = nil
+        // Stop any previous playback before reconfiguring
+        if playerNode.isPlaying {
+            playerNode.stop()
         }
         
-        let playerNode = AVAudioPlayerNode()
-        audioPlayerNode = playerNode
-        engine.attach(playerNode)
-        
-        // Use the server's sample rate (usually 24000)
+        // Create playback format matching the server's TTS sample rate
         let format = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: audioSampleRate,
@@ -756,43 +762,36 @@ class RealtimeCallService: NSObject, ObservableObject {
         )!
         playbackFormat = format
         
-        // Connect player -> mainMixer (within the playback engine)
-        engine.connect(playerNode, to: engine.mainMixerNode, format: format)
+        // Connect player -> mainMixer.
+        // NOTE: We pre-attached the playerNode to audioEngine in startAudioCapture()
+        // before the engine started. Calling connect() while the engine is running
+        // replaces the existing connection from the playerNode, which is safe for
+        // source nodes (AVAudioPlayerNode) since they don't participate in I/O.
+        audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: format)
         
-        // Ensure the engine is running
-        if !engine.isRunning {
-            engine.prepare()
-            do {
-                // Ensure audio session is configured for playback over speaker
-                try AVAudioSession.sharedInstance().setCategory(
-                    .playAndRecord,
-                    mode: .voiceChat,
-                    options: [.allowBluetoothHFP, .defaultToSpeaker, .mixWithOthers]
-                )
-                try AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker)
-                try engine.start()
-            } catch {
-                logger("Failed to start playback engine: \(error)")
-                return
-            }
+        // Ensure audio is routed to speaker (not earpiece)
+        do {
+            try AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker)
+        } catch {
+            logger("Failed to override audio port: \(error)")
         }
         
         playerNode.play()
-        logger("Audio playback started (dedicated engine)")
+        logger("Audio playback started on shared engine")
     }
     
     private func stopAudioPlayback() {
-        audioPlayerNode?.stop()
-        if let node = audioPlayerNode {
-            playbackEngine.detach(node)
-        }
-        audioPlayerNode = nil
-        playbackFormat = nil
-        pendingBuffers.removeAll()
+        // Stop scheduling new buffers
         isPlaybackScheduled = false
-        if playbackEngine.isRunning {
-            playbackEngine.stop()
+        pendingBuffers.removeAll()
+        
+        if let node = audioPlayerNode {
+            node.stop()
+            // Keep the node attached/connected to the engine; just stop producing
+            // audio. The connection will be reused on the next audio_start.
         }
+        playbackFormat = nil
+        logger("Audio playback stopped")
     }
     
     // MARK: - Helpers
