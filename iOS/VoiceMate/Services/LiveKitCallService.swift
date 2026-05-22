@@ -224,7 +224,7 @@ extension LiveKitCallService: RoomDelegate {
     func room(_ room: Room, participant: RemoteParticipant, didSubscribeToTrack publication: RemoteTrackPublication) {
         logger("Subscribed to track: \(publication.sid)")
         
-        if let audioTrack = publication.track as? AudioTrack {
+        if publication.track is AudioTrack {
             // When an audio track from the agent starts playing:
             // the agent is speaking
             DispatchQueue.main.async {
