@@ -1161,12 +1161,11 @@ import struct
 import math
 
 # Simple VAD: energy-based silence detection
-SILENCE_THRESHOLD = 500    # RMS threshold for silence (adjust for mic sensitivity)
+SILENCE_THRESHOLD = 300     # RMS threshold for silence
 SILENCE_DURATION_MS = 800  # ms of silence before considering utterance complete
-MIN_UTTERANCE_MS = 300     # minimum utterance length to process
+MIN_UTTERANCE_MS = 500     # minimum utterance length to process (ms)
 SAMPLE_RATE = 16000        # iOS sends 16kHz PCM16 mono
 BYTES_PER_SAMPLE = 2
-FRAME_MS = 50              # each audio chunk is ~50ms
 
 async def _stream_tts_to_websocket(websocket, text: str, voice=None, speed_ratio=None):
     """Generate TTS audio and stream it as PCM chunks via WebSocket.
@@ -1279,6 +1278,7 @@ async def ws_voice_realtime(websocket: WebSocket):
     # VAD state
     audio_buffer = bytearray()      # accumulates PCM16 16kHz audio
     silence_frames = 0              # consecutive silent frames
+    silence_duration_ms = 0.0       # accumulated silence duration (ms)
     utterance_active = False        # currently in an utterance
     utterance_buffer = bytearray()  # PCM data for current utterance
     
@@ -1289,7 +1289,7 @@ async def ws_voice_realtime(websocket: WebSocket):
     # ASR service placeholder (uses external API; for now we simulate with a simple approach)
     # In production, replace with Deepgram / Azure / Aliyun real-time ASR
     
-    logger.info(f"Full-duplex voice call started: {conv_id}")
+    logger.info(f"Full-duplex voice call started: {conv_id}, persona={persona}, voice={voice}")
     
     async def handle_barge_in():
         """Handle user interruption during AI speech."""
@@ -1313,11 +1313,15 @@ async def ws_voice_realtime(websocket: WebSocket):
         """Process a complete user utterance: ASR -> LLM -> TTS stream."""
         nonlocal ai_speaking, ai_speak_task
         
-        if len(utterance_bytes) < MIN_UTTERANCE_MS * SAMPLE_RATE // 1000 * BYTES_PER_SAMPLE:
+        utterance_len = len(utterance_bytes)
+        min_bytes = MIN_UTTERANCE_MS * SAMPLE_RATE // 1000 * BYTES_PER_SAMPLE
+        if utterance_len < min_bytes:
+            logger.info(f"Utterance too short: {utterance_len}B < {min_bytes}B minimum [{conv_id}]")
             return  # too short, ignore
         
         # Send asr_final (client-side ASR will provide the text separately)
         # For now, we just signal that we detected an utterance
+        logger.info(f"Sending asr_final to iOS [{conv_id}]")
         await websocket.send_json({
             "type": "asr_final",
             "text": "__vad_detected__",
@@ -1340,14 +1344,18 @@ async def ws_voice_realtime(websocket: WebSocket):
                 full_reply = ""
                 
                 # Stream LLM tokens
+                logger.info(f"Starting DeepSeek stream for [{conv_id}]")
                 async for token in deepseek.stream_chat(ai_text, conv_history, persona=persona):
                     if not ai_speaking:
+                        logger.info(f"DeepSeek stream interrupted [{conv_id}]")
                         return  # interrupted
                     full_reply += token
                     await websocket.send_json({"type": "token", "content": token})
                 
                 if not ai_speaking:
                     return
+                
+                logger.info(f"DeepSeek reply complete ({len(full_reply)} chars) [{conv_id}]")
                 
                 if not full_reply:
                     full_reply = "嗯，我听到了呢～"
@@ -1361,13 +1369,16 @@ async def ws_voice_realtime(websocket: WebSocket):
                     return
                 
                 # Stream TTS audio
+                logger.info(f"Starting TTS stream for [{conv_id}]")
                 await _stream_tts_to_websocket(websocket, clean_reply, voice=voice, speed_ratio=speed)
+                logger.info(f"TTS stream complete [{conv_id}]")
                 
                 if ai_speaking:
                     await websocket.send_json({
                         "type": "turn_done",
                         "conversation_id": conv_id,
                     })
+                    logger.info(f"Turn done sent [{conv_id}]")
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -1395,9 +1406,24 @@ async def ws_voice_realtime(websocket: WebSocket):
                     pass
                 break
             
+            # ── Extract raw data from ASGI Message dict ──
+            # FastAPI/Starlette receive() returns {'type': 'websocket.receive', 'bytes': ..., 'text': ...}
+            if isinstance(message, dict):
+                msg_bytes = message.get("bytes", None)
+                msg_text = message.get("text", None)
+            elif isinstance(message, bytes):
+                msg_bytes = message
+                msg_text = None
+            elif isinstance(message, str):
+                msg_bytes = None
+                msg_text = message
+            else:
+                msg_bytes = None
+                msg_text = None
+            
             # ── Binary: raw PCM16 audio from iOS mic ──
-            if isinstance(message, bytes):
-                pcm_chunk = message
+            if msg_bytes is not None:
+                pcm_chunk = msg_bytes
                 
                 # Calculate VAD
                 rms = _calc_rms(pcm_chunk)
@@ -1405,18 +1431,26 @@ async def ws_voice_realtime(websocket: WebSocket):
                 
                 if not is_silent:
                     # Energy detected: reset silence counter, accumulate
+                    if not utterance_active:
+                        logger.info(f"VAD: speech detected [{conv_id}] (RMS={rms:.1f})")
                     silence_frames = 0
+                    silence_duration_ms = 0.0
                     utterance_active = True
                     utterance_buffer.extend(pcm_chunk)
                 elif utterance_active:
-                    # Silence during utterance: count consecutive silent frames
+                    # Silence during utterance: accumulate actual silence duration
                     silence_frames += 1
                     utterance_buffer.extend(pcm_chunk)
                     
+                    # Compute actual duration of this chunk (in ms)
+                    chunk_samples = len(pcm_chunk) // BYTES_PER_SAMPLE
+                    chunk_duration_ms = (chunk_samples / SAMPLE_RATE) * 1000.0
+                    silence_duration_ms += chunk_duration_ms
+                    
                     # Check if silence is long enough to end utterance
-                    silence_ms = silence_frames * FRAME_MS
-                    if silence_ms >= SILENCE_DURATION_MS:
+                    if silence_duration_ms >= SILENCE_DURATION_MS:
                         # Utterance complete
+                        logger.info(f"VAD: utterance end after {silence_duration_ms:.0f}ms silence, {len(utterance_buffer)}B [{conv_id}]")
                         if ai_speaking:
                             # User started speaking while AI was talking -> barge-in
                             await handle_barge_in()
@@ -1428,13 +1462,16 @@ async def ws_voice_realtime(websocket: WebSocket):
                         utterance_active = False
                         utterance_buffer = bytearray()
                         silence_frames = 0
+                        silence_duration_ms = 0.0
                 # else: silence while not in utterance -> do nothing
                 
                 continue
             
             # ── Text: JSON messages ──
+            if msg_text is None:
+                continue
             try:
-                data = json.loads(message)
+                data = json.loads(msg_text)
             except (json.JSONDecodeError, TypeError):
                 continue
             
@@ -1469,6 +1506,7 @@ async def ws_voice_realtime(websocket: WebSocket):
                 # Client-side ASR transcribed text (may arrive alongside VAD)
                 text = data.get("text", "").strip()
                 if not text:
+                    logger.warning(f"Empty text received in text command [{conv_id}]")
                     continue
                 
                 if "voice" in data:
@@ -1480,7 +1518,8 @@ async def ws_voice_realtime(websocket: WebSocket):
                 if "conversation_id" in data and data["conversation_id"]:
                     conv_id = data["conversation_id"]
                 
-                logger.info(f"User text [{conv_id}]: {text[:60]}")
+                logger.info(f"User text [{conv_id}]: {text[:80]}")
+                logger.info(f"AI speak started for [{conv_id}]")
                 
                 # Handle barge-in if AI is speaking
                 if ai_speaking:

@@ -80,8 +80,8 @@ struct ContentView: View {
                     voice: voiceService.selectedVoice,
                     persona: voiceService.selectedPersona,
                     speed: voiceService.speechSpeed,
-                            onTurnCompleted: { [self] isUser, text in
-                                self.appendMessage(isUser: isUser, text: text)
+                    onTurnCompleted: { [self] isUser, text in
+                        self.appendMessage(isUser: isUser, text: text)
                     }
                 )
             }
