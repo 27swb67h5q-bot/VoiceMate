@@ -18,6 +18,9 @@ struct ContentView: View {
     @State private var showEmotion: String? = nil
     @State private var emotionMessageId: UUID? = nil
     
+    // Long-press recording state
+    @State private var isPressingForRecording = false
+    
     // Selection mode
     @State private var isSelecting = false
     @State private var selectedIds = Set<UUID>()
@@ -251,7 +254,7 @@ struct ContentView: View {
     
     private var textFieldArea: some View {
         HStack(spacing: 6) {
-            // Microphone toggle button — switches back to voice recording mode
+            // Tap to switch back to voice recording mode
             Button(action: {
                 withAnimation(.easeInOut(duration: 0.2)) {
                     inputMode = .voice
@@ -269,6 +272,15 @@ struct ContentView: View {
             
             TextField("输入消息...", text: $textInput)
                 .font(.body)
+                .onLongPressGesture(minimumDuration: 0.3) {
+                    let impact = UIImpactFeedbackGenerator(style: .light)
+                    impact.impactOccurred()
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        inputMode = .voice
+                        isTextFieldFocused = false
+                        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                    }
+                }
                 .focused($isTextFieldFocused)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
@@ -292,9 +304,13 @@ struct ContentView: View {
     
     private var voiceButtonArea: some View {
         Button(action: {
-            // Tap → switch to text input mode
+            // Tap → switch to text input mode (show keyboard)
             withAnimation(.easeInOut(duration: 0.2)) {
                 inputMode = .text
+                // Auto-focus the text field after switching
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                    isTextFieldFocused = true
+                }
             }
         }) {
             Text(audioService.isRecording ? "松开 发送" : "按住 说话")
@@ -317,10 +333,21 @@ struct ContentView: View {
                 .onEnded { _ in
                     if !audioService.isRecording && !voiceService.isProcessing {
                         audioService.startRecording()
+                        isPressingForRecording = true
                         let impact = UIImpactFeedbackGenerator(style: .medium)
                         impact.impactOccurred()
                     }
                 }
+                .sequenced(before: DragGesture(minimumDistance: 0)
+                    .onEnded { _ in
+                        if audioService.isRecording && isPressingForRecording {
+                            Task {
+                                await sendRecording()
+                                isPressingForRecording = false
+                            }
+                        }
+                    }
+                )
         )
         .disabled(voiceService.isProcessing)
     }
