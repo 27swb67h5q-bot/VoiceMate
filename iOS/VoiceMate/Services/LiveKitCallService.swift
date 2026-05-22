@@ -198,8 +198,8 @@ class LiveKitCallService: NSObject, ObservableObject {
 
 extension LiveKitCallService: RoomDelegate {
     
-    func room(_ room: Room, didConnect isReconnect: Bool) {
-        logger("Room connected (reconnect=\(isReconnect))")
+    func roomDidConnect(_ room: Room) {
+        logger("Room connected")
     }
     
     func room(_ room: Room, didDisconnect error: LiveKitError?) {
