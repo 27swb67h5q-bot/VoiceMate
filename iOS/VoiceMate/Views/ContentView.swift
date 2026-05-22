@@ -854,6 +854,7 @@ struct MessageBubble: View {
 struct SettingsView: View {
     @ObservedObject var service: VoiceMateService
     @Environment(\.dismiss) var dismiss
+    @AppStorage("proactive_enabled") private var proactiveEnabled = true
     @AppStorage("selected_voice") private var selectedVoice = "zh-CN-XiaoxiaoNeural"
     
     @AppStorage("cloned_voice_id") private var clonedVoiceId = ""
@@ -896,14 +897,8 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundColor(.gray)
                 }
-                
                 Section("主动推送") {
-                    Toggle("启用主动推送", isOn: Binding(
-                        get: { UserDefaults.standard.bool(forKey: "proactive_enabled") },
-                        set: { newValue in
-                            UserDefaults.standard.set(newValue, forKey: "proactive_enabled")
-                        }
-                    ))
+                    Toggle("启用主动推送", isOn: $proactiveEnabled)
                     Text("开启后，AI 会每隔 3 分钟主动发起对话")
                         .font(.caption)
                         .foregroundColor(.gray)
