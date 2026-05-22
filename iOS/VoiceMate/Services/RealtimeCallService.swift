@@ -243,7 +243,7 @@ class RealtimeCallService: NSObject, ObservableObject {
             case .failure(let error):
                 self.logger("WebSocket receive error: \(error)")
                 // Don't reconnect on normal closure
-                if let wsError = error as? URLError, wsError.code == .closed {
+                if let wsError = error as? URLError, wsError.code == .cancelled {
                     return
                 }
                 if self.isCallActive {
@@ -366,7 +366,7 @@ class RealtimeCallService: NSObject, ObservableObject {
         let audioSession = AVAudioSession.sharedInstance()
         do {
             // PlayAndRecord is required for full-duplex
-            try audioSession.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetooth, .defaultToSpeaker])
+            try audioSession.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP, .defaultToSpeaker])
             try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
         } catch {
             logger("Failed to set audio session: \(error)")
@@ -455,7 +455,7 @@ class RealtimeCallService: NSObject, ObservableObject {
         
         // Resample if needed
         let ratio = targetSampleRate / srcSampleRate
-        let targetFrames = Int(Double(srcFrames) * ratio)
+        _ = Int(Double(srcFrames) * ratio)
         
         let resampled: [Float]
         if abs(ratio - 1.0) > 0.001 {
@@ -527,7 +527,7 @@ class RealtimeCallService: NSObject, ObservableObject {
         guard let engine = audioEngineP else { return }
         
         // If already setup, just connect
-        if let existingNode = audioPlayerNode, engine.isRunning {
+        if audioPlayerNode != nil, engine.isRunning {
             return
         }
         
