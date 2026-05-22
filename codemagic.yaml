@@ -1,40 +1,30 @@
 workflows:
-  ios-build:
+  ios-app:
     name: VoiceMate iOS
     instance_type: mac_mini_m2
-    max_build_duration: 30
+    max_build_duration: 60
     environment:
-      vars:
-        APP_NAME: "VoiceMate"
+      ios:
+        xcode: 15.4
     scripts:
-      - name: Build unsigned IPA for TrollStore
+      - name: Generate Xcode project from XcodeGen
         script: |
-          set -e -x
           cd iOS
-          
-          # Install xcodegen if not present
-          which xcodegen >/dev/null 2>&1 || brew install xcodegen
-          
-          # Clean stale xcodeproj, then regenerate
-          rm -rf VoiceMate.xcodeproj
           xcodegen generate
-          
-          # Build for iOS device (unsigned)
-          xcodebuild \
-            -project "VoiceMate.xcodeproj" \
-            -scheme "VoiceMate" \
-            -configuration Release \
+      - name: Build iOS app
+        script: |
+          cd iOS
+          xcodebuild -project VoiceMate.xcodeproj \
+            -scheme VoiceMate \
             -sdk iphoneos \
-            -derivedDataPath ../build \
+            -configuration Release \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
-            clean build
-          
-          # Create IPA for TrollStore
-          mkdir -p output/Payload
-          cp -r "../build/Build/Products/Release-iphoneos/VoiceMate.app" output/Payload/
-          cd output
-          zip -r "../${APP_NAME}.ipa" Payload/
+            build
     artifacts:
-      - iOS/VoiceMate.ipa
+      - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.app
+    publishing:
+      email:
+        recipients:
+          - builder@voicemate.app
