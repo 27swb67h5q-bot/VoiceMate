@@ -232,12 +232,10 @@ class RealtimeCallService: NSObject, ObservableObject {
             object: AVAudioSession.sharedInstance(),
             queue: .main
         ) { [weak self] _ in
-            // .defaultToSpeaker was set at category-config time and persists across
-            // route changes automatically — no need for overrideOutputAudioPort here.
-            // The audio session is kept active, so AEC continues working
-            // seamlessly across route changes.
+            // iOS resets overrideOutputAudioPort(.speaker) on route changes, so re-apply it.
             guard let self = self else { return }
-            self.logger("Audio route changed, AEC remains active via .voiceChat mode")
+            try? AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker)
+            self.logger("Audio route changed, re-applied speaker output override")
         }
         logger("Route change observer registered")
     }
@@ -502,8 +500,8 @@ class RealtimeCallService: NSObject, ObservableObject {
                     node.stop()
                 }
                 self.setupAudioPlayback()
-                // Do NOT call overrideOutputAudioPort(.speaker) here — .voiceChat mode
-                // provides built-in AEC that requires the system to manage routing.
+                // Route audio to speaker even in .voiceChat mode (safe: does not reconfigure session)
+                try? AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker)
                 self.startPlaybackNode()
             
             case "audio_end":
@@ -801,8 +799,8 @@ class RealtimeCallService: NSObject, ObservableObject {
             // Prepare player node before engine start to init scheduler (iOS 16.x safety)
             playerNode.prepare(withFrameCount: 8820)
             try audioEngine.start()
-            // overrideOutputAudioPort(.speaker) is NOT called here (would crash on a
-            // running engine). .defaultToSpeaker was set at category-config time above.
+            try? AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker)
+            // Route audio to speaker (safe: overrideOutputAudioPort does not reconfigure the session)
             isMicActive = true
             logger("Audio capture started (16kHz)")
         } catch {

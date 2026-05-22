@@ -68,6 +68,12 @@ TTS_VOLUME = os.environ.get("VOICEMATE_TTS_VOLUME", "+0%")
 CLONE_DIR = Path(os.environ.get("VOICEMATE_CLONE_DIR", "/root/VoiceMate/cloned_voices"))
 CLONE_DIR.mkdir(parents=True, exist_ok=True)
 
+# Filler/filler words to skip LLM calls (user thinking noises like "嗯", "um", "uh")
+FILLER_WORDS = {
+    "嗯", "呃", "啊", "哦", "噢", "吖", "哈", "嘿",
+    "um", "uh", "ah", "er", "hmm",
+}
+
 
 # System prompts for different personas
 PERSONAS = {
@@ -1161,7 +1167,7 @@ _load_clone_db()
 # WebRTC VAD configuration
 import webrtcvad
 VAD_FRAME_MS = 30           # webrtcvad requires 10/20/30ms frames; 30ms = 480 bytes at 16kHz 16-bit
-SILENCE_DURATION_MS = 600   # ms of silence before considering utterance complete (reduced from 1500)
+SILENCE_DURATION_MS = 1000  # ms of silence before considering utterance complete (increased to 1s to avoid cutting off user thinking pauses)
 MIN_UTTERANCE_MS = 500     # minimum utterance length to process (ms)
 SAMPLE_RATE = 16000        # iOS sends 16kHz PCM16 mono
 BYTES_PER_SAMPLE = 2
@@ -1269,6 +1275,8 @@ async def ws_voice_realtime(websocket: WebSocket):
     vad = webrtcvad.Vad(mode=2)
     vad_buffer = bytearray()        # PCM buffer to accumulate VAD frame (480 bytes for 30ms @ 16kHz)
     silence_frames = 0              # consecutive silent frames
+    speech_confirm_frames = 0   # consecutive speech frames needed to start utterance (require >= 4)
+    VAD_CONFIRM_FRAMES = 4          # require 4 consecutive speech frames (120ms) before utterance starts
     silence_duration_ms = 0.0       # accumulated silence duration (ms)
     utterance_active = False        # currently in an utterance
     utterance_buffer = bytearray()  # PCM data for current utterance
@@ -1324,11 +1332,25 @@ async def ws_voice_realtime(websocket: WebSocket):
         # The VAD here is used to trigger the flow; actual transcribed text comes from client.
         # See the "text" command handler below.
     
+    def _is_filler_text(text: str) -> bool:
+        """Check if text is just filler/thinking noise (e.g., "嗯", "um", "啊")."""
+        stripped = text.strip().rstrip(".。!！?？,，…").lower()
+        return stripped in FILLER_WORDS
+
     async def ai_speak(ai_text: str):
         """Run LLM stream + TTS stream for AI response."""
         nonlocal ai_speaking, ai_speak_task
-        
+
+        # Skip filler/thinking noises (e.g., "嗯", "um", "啊") - do not call LLM
+        if _is_filler_text(ai_text):
+            logger.info(f"Ignoring filler text: {ai_text!r} [{conv_id}]")
+            return
+
         # Guard: if already speaking, cancel previous task first
+        if ai_speaking:
+            await handle_barge_in()
+            # Small yield to ensure cancellation completes
+
         if ai_speaking:
             await handle_barge_in()
             # Small yield to ensure cancellation completes
@@ -1439,15 +1461,31 @@ async def ws_voice_realtime(websocket: WebSocket):
                     chunk_duration_ms = float(VAD_FRAME_MS)
                     
                     if is_speech:
-                        # Speech detected: reset silence counter, accumulate
                         if not utterance_active:
-                            logger.info(f"VAD: speech detected [{conv_id}]")
-                        silence_frames = 0
-                        silence_duration_ms = 0.0
-                        utterance_active = True
-                        utterance_buffer.extend(frame)
-                    elif utterance_active:
-                        # Silence during utterance: accumulate silence duration
+                            # Not yet in utterance: accumulate confirmation frames
+                            speech_confirm_frames += 1
+                            if speech_confirm_frames >= VAD_CONFIRM_FRAMES:
+                                # Confirmed speech: start utterance
+                                logger.info(f"VAD: speech confirmed ({VAD_CONFIRM_FRAMES} frames) [{conv_id}]")
+                                utterance_active = True
+                                # Do NOT accumulate past frames into utterance_buffer;
+                                # those are already discarded. The next frame is the first
+                                # that goes into utterance_buffer.
+                        else:
+                            # Already in utterance: reset silence counter, accumulate
+                            silence_frames = 0
+                            silence_duration_ms = 0.0
+                            utterance_buffer.extend(frame)
+                    else:
+                        if not utterance_active:
+                            # Silence while confirming — reset counter
+                            if speech_confirm_frames > 0:
+                                speech_confirm_frames = 0
+                        else:
+                            # Silence during utterance: accumulate silence duration
+                            silence_frames += 1
+                            utterance_buffer.extend(frame)
+                            silence_duration_ms += chunk_duration_ms
                         silence_frames += 1
                         utterance_buffer.extend(frame)
                         silence_duration_ms += chunk_duration_ms
