@@ -809,21 +809,27 @@ class RealtimeCallService: NSObject, ObservableObject {
             logger("setupAudioPlayback: playerNode not pre-attached")
             return
         }
+        guard let mixNode = playbackMixerNode else {
+            logger("setupAudioPlayback: playbackMixerNode not available")
+            return
+        }
         
-        // Only update format if sample rate changed; avoids unnecessary reallocation
-        // and keeps the format valid reference for handleAudioData.
+        // Only reconnect and update format if sample rate changed
         if playbackFormat?.sampleRate != audioSampleRate {
-            // The playerNode is already permanently connected to playbackMixerNode with
-            // nil format (automatic format conversion), so we do NOT reconnect the audio
-            // graph on a running engine — that can crash.
-            // We only need the format object for constructing PCM buffers from incoming data.
-            let format = AVAudioFormat(
+            // Reconnect the player node to the playback mixer with an explicit format
+            // matching the server's sample rate (e.g. 24000 Hz). This tells the engine
+            // the player node's output format, so scheduleBuffer buffers must match it.
+            // The engine will automatically perform sample rate conversion between the
+            // player node (24000 Hz) and the mixer/hardware output (~48000 Hz).
+            let playerFormat = AVAudioFormat(
                 commonFormat: .pcmFormatFloat32,
                 sampleRate: audioSampleRate,
                 channels: 1,
                 interleaved: false
             )!
-            playbackFormat = format
+            audioEngine.connect(playerNode, to: mixNode, format: playerFormat)
+            playbackFormat = playerFormat
+            logger("Audio graph reconnected: player node format -> \(Int(audioSampleRate)) Hz")
         }
         
         // NOTE: Do NOT call playerNode.stop() here — on iOS 16.x, calling stop()
@@ -832,7 +838,7 @@ class RealtimeCallService: NSObject, ObservableObject {
         
         logger("Audio playback format set (sample rate: \(Int(audioSampleRate)) Hz)")
     }
-    
+
     /// Starts (or restarts) the player node for streaming playback.
     ///
     /// On iOS 16.x, calling stop() on an AVAudioPlayerNode that has never received
