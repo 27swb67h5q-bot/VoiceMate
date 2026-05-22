@@ -2,12 +2,13 @@ workflows:
   ios-build:
     name: VoiceMate
     environment:
-      xcode: 15.4
+      xcode: latest
     scripts:
       - name: Build
         script: |
           cd iOS
-          xcodebuild -project VoiceMate.xcodeproj \
+          xcodebuild \
+            -project VoiceMate.xcodeproj \
             -scheme VoiceMate \
             -sdk iphoneos \
             -configuration Release \
