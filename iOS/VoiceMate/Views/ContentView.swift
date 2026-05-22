@@ -80,7 +80,10 @@ struct ContentView: View {
                     serverPort: voiceService.serverPort,
                     voice: voiceService.selectedVoice,
                     persona: voiceService.selectedPersona,
-                    speed: voiceService.speechSpeed
+                    speed: voiceService.speechSpeed,
+                    onTurnCompleted: { isUser, text in
+                        appendMessage(isUser: isUser, text: text)
+                    }
                 )
             }
             .alert("连接失败", isPresented: $showConnectionError) {
@@ -748,6 +751,20 @@ struct MessageBubble: View {
                 isPlaying = false
             }
         }
+    }
+    
+    /// Append real-time call transcript entries as ChatMessage objects to the main chat
+    /// Append a single ChatMessage from the real-time call and persist
+    private func appendMessage(isUser: Bool, text: String) {
+        let msg = ChatMessage(
+            id: UUID(),
+            isUser: isUser,
+            text: text,
+            audioURL: nil,
+            timestamp: Date()
+        )
+        messages.append(msg)
+        saveMessages()
     }
 }
 

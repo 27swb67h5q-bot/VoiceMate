@@ -19,6 +19,8 @@ struct RealtimeCallView: View {
     let voice: String
     let persona: String
     let speed: Double
+    let onTranscript: ([(isUser: Bool, text: String)]) -> Void
+    let onTurnCompleted: (_ isUser: Bool, _ text: String) -> Void
     
     @StateObject private var callService: RealtimeCallService
     
@@ -26,20 +28,23 @@ struct RealtimeCallView: View {
     @State private var pulseOpacity: Double = 0.6
     @State private var showCopied = false
     
-    init(serverHost: String, serverPort: String, voice: String, persona: String, speed: Double) {
+    init(serverHost: String, serverPort: String, voice: String, persona: String, speed: Double, onTranscript: @escaping ([(isUser: Bool, text: String)]) -> Void = { _ in }, onTurnCompleted: @escaping (_ isUser: Bool, _ text: String) -> Void = { _, _ in }) {
         self.serverHost = serverHost
         self.serverPort = serverPort
         self.voice = voice
         self.persona = persona
         self.speed = speed
+        self.onTranscript = onTranscript
         
-        _callService = StateObject(wrappedValue: RealtimeCallService(
+        let service = RealtimeCallService(
             serverHost: serverHost,
             serverPort: serverPort,
             voice: voice,
             persona: persona,
             speed: speed
-        ))
+        )
+        service.onTurnCompleted = onTurnCompleted
+        _callService = StateObject(wrappedValue: service)
     }
     
     var body: some View {
@@ -180,7 +185,12 @@ struct RealtimeCallView: View {
         }
         .onDisappear {
             UIApplication.shared.isIdleTimerDisabled = false
+            let transcript = callService.transcript
             callService.endCall()
+            // Pass transcript back to ContentView
+            if !transcript.isEmpty {
+                onTranscript(transcript)
+            }
         }
         .onChange(of: callService.isCallActive) { active in
             if !active {

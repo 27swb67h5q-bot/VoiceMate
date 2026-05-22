@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import Accelerate
+import Speech
 
 /// Manages a true full-duplex real-time voice conversation with the VoiceMate backend.
 ///
@@ -35,6 +36,13 @@ class RealtimeCallService: NSObject, ObservableObject {
     @Published var aiText: String = ""
     @Published var callDuration: TimeInterval = 0
     @Published var errorMessage: String?
+    /// Transcript collected during the call (user + AI message pairs)
+    @Published var transcript: [(isUser: Bool, text: String)] = []
+    /// Current user utterance being built by on-device ASR
+    @Published var pendingUserText: String = ""
+    /// Lock flag to avoid sending duplicate text messages
+    private var isProcessingUtterance = false
+    private var lastSentUserText: String = ""
     
     // MARK: - Configuration
     private var serverHost: String
@@ -60,6 +68,10 @@ class RealtimeCallService: NSObject, ObservableObject {
     // MARK: - Audio Playback (Streaming)
     private var audioPlayerNode: AVAudioPlayerNode?
     private var audioEngineP: AVAudioEngine?  // playback-only engine
+
+    /// Callback invoked per-turn when a user utterance or AI reply completes
+    var onTurnCompleted: ((_ isUser: Bool, _ text: String) -> Void)?
+
     private var playbackFormat: AVAudioFormat?
     private var audioSampleRate: Double = 24000
     
@@ -69,6 +81,11 @@ class RealtimeCallService: NSObject, ObservableObject {
     
     // Call duration timer
     private var durationTimer: Timer?
+    
+    // MARK: - On-Device Speech Recognition (SFSpeechRecognizer)
+    private let speechRecognizer: SFSpeechRecognizer?
+    private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
+    private var recognitionTask: SFSpeechRecognitionTask?
     
     // MARK: - Init
     
@@ -86,14 +103,25 @@ class RealtimeCallService: NSObject, ObservableObject {
         
         super.init()
         requestPermissions()
+        setupSpeechRecognizer()
     }
     
     deinit {
         endCall()
     }
     
+    private func setupSpeechRecognizer() {
+        self.speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN"))
+        // Pre-create the recognition request so startAudioCapture() can feed it buffers
+        self.recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
+        self.recognitionRequest?.shouldReportPartialResults = true
+    }
+    
     private func requestPermissions() {
         AVAudioSession.sharedInstance().requestRecordPermission { _ in }
+        SFSpeechRecognizer.requestAuthorization { status in
+            print("[RealtimeCall] Speech recognition auth: \(status.rawValue)")
+        }
     }
     
     // MARK: - Call Lifecycle
@@ -126,6 +154,7 @@ class RealtimeCallService: NSObject, ObservableObject {
         isMicActive = false
         
         stopAudioCapture()
+        stopASR()
         stopAudioPlayback()
         disconnectWebSocket()
         
@@ -137,6 +166,9 @@ class RealtimeCallService: NSObject, ObservableObject {
         reconnectTimer = nil
         
         try? AVAudioSession.sharedInstance().setActive(false)
+        
+        logger("Call ended. Transcript count: \(transcript.count)")
+        // transcript is kept so the view can read it after endCall
     }
     
     // MARK: - WebSocket Connection
@@ -276,16 +308,41 @@ class RealtimeCallService: NSObject, ObservableObject {
                 if let content = json["text"] as? String {
                     self.currentText = content
                 }
-                // VAD detected utterance complete — prepare for AI response
-                
-            case "token":
-                if let content = json["content"] as? String {
-                    self.aiText += content
+                // VAD detected utterance complete — send transcribed text to trigger AI response
+                let transcribed = self.pendingUserText
+                if !transcribed.isEmpty && !self.isProcessingUtterance {
+                    self.isProcessingUtterance = true
+                    self.lastSentUserText = transcribed
+                    // Add to transcript immediately
+                    self.transcript.append((isUser: true, text: transcribed))
+                    self.onTurnCompleted?(true, transcribed)
+                    self.sendJson([
+                        "type": "text",
+                        "text": transcribed,
+                        "voice": self.voice,
+                        "persona": self.persona,
+                        "speed": self.speed,
+                    ])
+                    self.logger("Sent transcribed text: \(transcribed.prefix(60))")
+                    self.pendingUserText = ""
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        self.isProcessingUtterance = false
+                    }
+                } else if !self.isProcessingUtterance {
+                    // No transcription available yet — send a fallback so AI still responds
+                    self.lastSentUserText = "\u{55ef}"
+                    self.transcript.append((isUser: true, text: "\u{55ef}"))
+                    self.onTurnCompleted?(true, "\u{55ef}")
+                    self.sendJson(["type": "text", "text": "\u{55ef}", "voice": self.voice, "persona": self.persona, "speed": self.speed])
+                    self.logger("No ASR text yet, sent fallback")
                 }
                 
             case "audio_start":
                 self.isAISpeaking = true
                 self.isUserSpeaking = false
+                if !self.aiText.isEmpty {
+                    self.transcript.append((isUser: false, text: self.aiText))
+                }
                 self.aiText = ""
                 if let sr = json["sample_rate"] as? Double {
                     self.audioSampleRate = sr
@@ -299,9 +356,19 @@ class RealtimeCallService: NSObject, ObservableObject {
                 }
                 
             case "turn_done":
+                if !self.aiText.isEmpty {
+                    self.transcript.append((isUser: false, text: self.aiText))
+                    self.onTurnCompleted?(false, self.aiText)
+                }
                 self.isAISpeaking = false
                 self.currentText = ""
                 self.aiText = ""
+                // Re-enable utterance processing for next turn
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    self.isProcessingUtterance = false
+                    self.pendingUserText = ""
+                    self.lastSentUserText = ""
+                }
                 
             case "interrupted":
                 self.isAISpeaking = false
@@ -322,6 +389,49 @@ class RealtimeCallService: NSObject, ObservableObject {
         }
     }
     
+
+    // MARK: - On-Device Speech Recognition
+
+    private func startASR() {
+        guard let recognizer = speechRecognizer, recognizer.isAvailable else {
+            logger("ASR: speech recognizer not available")
+            return
+        }
+
+        recognitionTask?.cancel()
+
+        // Recreate recognition request if needed (e.g. after endCall + restart)
+        if recognitionRequest == nil {
+            let request = SFSpeechAudioBufferRecognitionRequest()
+            request.shouldReportPartialResults = true
+            recognitionRequest = request
+        }
+        guard let request = recognitionRequest else {
+            logger("ASR: recognitionRequest not set up yet")
+            return
+        }
+
+        recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
+            DispatchQueue.main.async {
+                if let result = result {
+                    self?.pendingUserText = result.bestTranscription.formattedString
+                    self?.currentText = result.bestTranscription.formattedString
+                }
+                if error != nil {
+                    self?.logger("ASR error: \(error?.localizedDescription ?? "unknown")")
+                }
+            }
+        }
+    }
+
+    private func stopASR() {
+        recognitionRequest?.endAudio()
+        recognitionTask?.cancel()
+        recognitionTask = nil
+        recognitionRequest = nil
+        logger("On-device ASR stopped")
+    }
+
     private func handleAudioData(_ data: Data) {
         // PCM16 audio chunks from server — play immediately
         guard let playerNode = audioPlayerNode, let engine = audioEngineP, engine.isRunning else {
@@ -396,6 +506,9 @@ class RealtimeCallService: NSObject, ObservableObject {
             if !convertedData.isEmpty {
                 self.sendAudioChunk(convertedData)
                 
+                // Also feed the original buffer to on-device ASR
+                self.recognitionRequest?.append(buffer)
+                
                 // Quick VAD for UI state
                 let rms = self.calculateRMS(from: buffer)
                 DispatchQueue.main.async {
@@ -418,6 +531,8 @@ class RealtimeCallService: NSObject, ObservableObject {
             logger("Failed to start audio engine: \(error)")
             errorMessage = "麦克风启动失败"
         }
+        // Start on-device ASR alongside mic capture
+        startASR()
     }
     
     private func stopAudioCapture() {
