@@ -214,11 +214,11 @@ extension LiveKitCallService: RoomDelegate {
     }
     
     func room(_ room: Room, participantDidConnect participant: RemoteParticipant) {
-        logger("Remote participant joined: \(participant.identity)")
+        logger("Remote participant joined: \(participant.identity ?? "unknown")")
     }
     
     func room(_ room: Room, participantDidDisconnect participant: RemoteParticipant) {
-        logger("Remote participant left: \(participant.identity)")
+        logger("Remote participant left: \(participant.identity ?? "unknown")")
     }
     
     func room(_ room: Room, participant: RemoteParticipant, didSubscribeToTrack publication: RemoteTrackPublication) {
