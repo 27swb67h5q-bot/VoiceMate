@@ -536,6 +536,7 @@ struct ContentView: View {
     
     /// Fire a proactive check to the backend
     private func fireProactive() async {
+        guard proactiveEnabled else { return }
         guard let url = URL(string: "http://\(voiceService.serverHost):\(voiceService.serverPort)/v1/proactive?persona=\(voiceService.selectedPersona)") else { return }
         do {
             let (data, response) = try await URLSession.shared.data(from: url)
