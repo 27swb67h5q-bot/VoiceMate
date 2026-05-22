@@ -19,15 +19,36 @@ workflows:
       - name: Package IPA for TrollStore
         script: |
           APP_PATH=$(find "$HOME/Library/Developer/Xcode/DerivedData" -name "VoiceMate.app" -path "*/Release-iphoneos/*" | head -1)
-          echo "Found app at: $APP_PATH"
-          ls "$APP_PATH"
+          echo "App: $APP_PATH"
+
+          # Find LiveKit's embedded frameworks
+          PKG_FW="$HOME/Library/Developer/Xcode/DerivedData/VoiceMate-*/Build/Products/Release-iphoneos/PackageFrameworks"
+          echo "PackageFrameworks: $(ls -d $HOME/Library/Developer/Xcode/DerivedData/VoiceMate-*/Build/Products/Release-iphoneos/PackageFrameworks 2>/dev/null || echo 'not found')"
+
           cd /tmp
           rm -rf Payload
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
-          ls Payload/
+
+          # Copy LiveKit dynamic frameworks into the app bundle
+          FW_DIR="$HOME/Library/Developer/Xcode/DerivedData/VoiceMate-*/Build/Products/Release-iphoneos/PackageFrameworks"
+          for fw in $(ls -d $FW_DIR/*.framework 2>/dev/null); do
+            echo "Embedding framework: $(basename $fw)"
+            cp -R "$fw" "Payload/VoiceMate.app/Frameworks/" 2>/dev/null || \
+            cp -R "$fw" "Payload/VoiceMate.app/" 2>/dev/null
+          done
+
+          # Also check for WebRTC framework
+          WEBRTC=$(find "$HOME/Library/Developer/Xcode/DerivedData" -name "WebRTC.framework" -path "*/Release-iphoneos/*" 2>/dev/null | head -1)
+          if [ -n "$WEBRTC" ]; then
+            echo "Embedding WebRTC: $WEBRTC"
+            mkdir -p "Payload/VoiceMate.app/Frameworks"
+            cp -R "$WEBRTC" "Payload/VoiceMate.app/Frameworks/"
+          fi
+
+          ls -la Payload/VoiceMate.app/
           zip -r "$HOME/clone/VoiceMate.ipa" Payload/
           rm -rf Payload
-          echo "IPA created at $HOME/clone/VoiceMate.ipa"
+          echo "IPA ready"
     artifacts:
       - VoiceMate.ipa
