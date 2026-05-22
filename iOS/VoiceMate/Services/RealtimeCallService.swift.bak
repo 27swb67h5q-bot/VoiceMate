@@ -71,16 +71,12 @@ class RealtimeCallService: NSObject, ObservableObject {
     
     // MARK: - Audio Playback (Shared engine — playerNode attached to audioEngine)
     // MARK: - Audio Playback (Streaming)
-    private var playbackPlayerNode: AVAudioPlayerNode?
+    private var audioPlayerNode: AVAudioPlayerNode?
     /// Playback audio buffer queue — buffers arriving chunks while player is busy
     private let playbackQueue = DispatchQueue(label: "com.voicemate.playback", qos: .userInitiated)
     private var pendingBuffers: [AVAudioPCMBuffer] = []
-    /// Serial queue for scheduling playback buffers to avoid race conditions
-    private let scheduleQueue = DispatchQueue(label: "com.voicemate.schedule", qos: .userInitiated)
+    private var isPlaybackScheduled = false
 
-    private var playbackFormat: AVAudioFormat?
-    /// Dedicated mixer node to avoid reconnecting to mainMixer on a running engine
-    private var playbackMixerNode: AVAudioMixerNode?
     /// Callback invoked per-turn when a user utterance or AI reply completes
     var onTurnCompleted: ((_ isUser: Bool, _ text: String) -> Void)?
 
@@ -170,15 +166,14 @@ class RealtimeCallService: NSObject, ObservableObject {
         stopAudioCapture()
         stopASR()
         
-        // Detach the player node and mixer so startAudioCapture can re-attach fresh ones.
-        if let node = playbackPlayerNode {
+        // Detach the player node so startAudioCapture can re-attach a fresh one.
+        if let node = audioPlayerNode {
             audioEngine.detach(node)
         }
-        if let mixNode = playbackMixerNode {
-            audioEngine.detach(mixNode)
-        }
-        playbackPlayerNode = nil
-        playbackMixerNode = nil
+        audioPlayerNode = nil
+        playbackFormat = nil
+        pendingBuffers.removeAll()
+        isPlaybackScheduled = false
         
         disconnectWebSocket()
         
@@ -511,11 +506,11 @@ class RealtimeCallService: NSObject, ObservableObject {
 
     private func handleAudioData(_ data: Data) {
         // PCM16 audio chunks from server — play via the single engine
-        guard let playerNode = playbackPlayerNode, let format = playbackFormat else {
+        guard let playerNode = audioPlayerNode, let format = playbackFormat else {
             return
         }
         
-        guard audioEngine.isRunning else { return }
+        guard engineSupportsPlayback() else { return }
         
         let frameLength = data.count / 2  // 16-bit samples
         guard frameLength > 0 else { return }
@@ -525,36 +520,54 @@ class RealtimeCallService: NSObject, ObservableObject {
         }
         pcmBuffer.frameLength = AVAudioFrameCount(frameLength)
         
-        // Convert PCM16 -> Float32 directly in the PCM buffer's float storage,
-        // avoiding intermediate Swift array allocation and unsafe memcpy on Swift Array value types.
-        guard let floatPtr = pcmBuffer.floatChannelData?[0] else { return }
+        // Copy PCM16 data into float buffer
         data.withUnsafeBytes { (rawPtr: UnsafeRawBufferPointer) in
             guard let srcPtr = rawPtr.baseAddress?.assumingMemoryBound(to: Int16.self) else { return }
-            // vDSP_vflt16: Int16 samples -> Float32 values in [-32768, 32767]
-            vDSP_vflt16(srcPtr, 1, floatPtr, 1, vDSP_Length(frameLength))
-            // Normalize to [-1.0, 1.0]
+            guard let dstPtr = pcmBuffer.floatChannelData?[0] else { return }
+            
+            // Convert Int16 to Float32 with scaling
+            var buffer = [Int16](repeating: 0, count: frameLength)
+            memcpy(&buffer, srcPtr, data.count)
+            
+            var floatBuffer = [Float](repeating: 0, count: frameLength)
+            vDSP_vflt16(buffer, 1, &floatBuffer, 1, vDSP_Length(frameLength))
             var scale = Float(Int16.max)
-            vDSP_vsdiv(floatPtr, 1, &scale, floatPtr, 1, vDSP_Length(frameLength))
+            vDSP_vsdiv(floatBuffer, 1, &scale, &floatBuffer, 1, vDSP_Length(frameLength))
+            
+            memcpy(dstPtr, floatBuffer, frameLength * MemoryLayout<Float>.size)
         }
         
-        // Schedule directly on the player node via serial queue.
-        // scheduleBuffer is thread-safe, but serializing through scheduleQueue
-        // ensures ordering and avoids races when stop/reset happen concurrently.
-        scheduleQueue.async { [weak self] in
-            guard let self = self, let node = self.playbackPlayerNode, node.isPlaying else { return }
-            node.scheduleBuffer(pcmBuffer)
+        playbackQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.pendingBuffers.append(pcmBuffer)
+            self.scheduleNextPlaybackBuffer(playerNode: playerNode)
         }
     }
     
     /// Check if the playback engine is properly configured
     private func engineSupportsPlayback() -> Bool {
         guard audioEngine.isRunning else { return false }
-        guard playbackPlayerNode != nil else { return false }
+        guard audioPlayerNode != nil else { return false }
         guard playbackFormat != nil else { return false }
         return true
     }
     
-
+    /// Schedule the next buffer from the pending queue on the player node
+    private func scheduleNextPlaybackBuffer(playerNode: AVAudioPlayerNode) {
+        guard !isPlaybackScheduled, !pendingBuffers.isEmpty else { return }
+        
+        let buffer = pendingBuffers.removeFirst()
+        isPlaybackScheduled = true
+        
+        playerNode.scheduleBuffer(buffer) { [weak self] in
+            guard let self = self else { return }
+            self.playbackQueue.async {
+                self.isPlaybackScheduled = false
+                self.scheduleNextPlaybackBuffer(playerNode: playerNode)
+            }
+        }
+    }
+    
     // MARK: - Audio Capture (Always-on Mic)
     
     private func startAudioCapture() {
@@ -611,18 +624,14 @@ class RealtimeCallService: NSObject, ObservableObject {
             }
         }
         
-        // Pre-attach player node and a dedicated mixer for TTS playback (must be done
-        // before engine starts). The dedicated mixer avoids reconnecting the player node
-        // to mainMixer on a running engine during every audio_start, which can crash.
-        let mixNode = AVAudioMixerNode()
-        audioEngine.attach(mixNode)
-        audioEngine.connect(mixNode, to: audioEngine.mainMixerNode, format: nil)
-        
+        // Pre-attach a player node for TTS playback (must be done before engine starts)
+        // so we don't need a separate playback engine (which would conflict on the same
+        // audio session output unit).
         let playerNode = AVAudioPlayerNode()
+        audioPlayerNode = playerNode
         audioEngine.attach(playerNode)
-        audioEngine.connect(playerNode, to: mixNode, format: nil)
-        playbackPlayerNode = playerNode
-        playbackMixerNode = mixNode
+        
+        audioEngine.prepare()
         do {
             try audioEngine.start()
             isMicActive = true
@@ -734,16 +743,17 @@ class RealtimeCallService: NSObject, ObservableObject {
     // MARK: - Audio Playback (Streaming)
     
     private func setupAudioPlayback() {
-        guard let playerNode = playbackPlayerNode else {
+        guard let playerNode = audioPlayerNode else {
             logger("setupAudioPlayback: playerNode not pre-attached")
             return
         }
         
-        // Create playback format matching the server's TTS sample rate.
-        // The playerNode is already permanently connected to playbackMixerNode with
-        // nil format (automatic format conversion), so we do NOT reconnect the audio
-        // graph on a running engine — that can crash.
-        // We only need the format object for constructing PCM buffers from incoming data.
+        // Stop any previous playback before reconfiguring
+        if playerNode.isPlaying {
+            playerNode.stop()
+        }
+        
+        // Create playback format matching the server's TTS sample rate
         let format = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: audioSampleRate,
@@ -752,11 +762,12 @@ class RealtimeCallService: NSObject, ObservableObject {
         )!
         playbackFormat = format
         
-        // Stop and restart the player node to flush any previous TTS buffers.
-        // Stopping/starting a source node on a running engine is safe and does not
-        // reconfigure the audio graph.
-        playerNode.stop()
-        playerNode.play()
+        // Connect player -> mainMixer.
+        // NOTE: We pre-attached the playerNode to audioEngine in startAudioCapture()
+        // before the engine started. Calling connect() while the engine is running
+        // replaces the existing connection from the playerNode, which is safe for
+        // source nodes (AVAudioPlayerNode) since they don't participate in I/O.
+        audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: format)
         
         // Ensure audio is routed to speaker (not earpiece)
         do {
@@ -765,27 +776,23 @@ class RealtimeCallService: NSObject, ObservableObject {
             logger("Failed to override audio port: \(error)")
         }
         
-        logger("Audio playback started (sample rate: \(Int(audioSampleRate)) Hz)")
+        playerNode.play()
+        logger("Audio playback started on shared engine")
     }
     
-    
     private func stopAudioPlayback() {
-        guard let playerNode = playbackPlayerNode else { return }
+        // Stop scheduling new buffers
+        isPlaybackScheduled = false
+        pendingBuffers.removeAll()
         
-        // Stop scheduling new buffers. scheduleQueue serialization ensures we don't
-        // have concurrent scheduleBuffer calls racing with stop().
-        scheduleQueue.sync {
-            pendingBuffers.removeAll()
+        if let node = audioPlayerNode {
+            node.stop()
+            // Keep the node attached/connected to the engine; just stop producing
+            // audio. The connection will be reused on the next audio_start.
         }
-        
-        // Stop the player node. Safe on a running engine.
-        playerNode.stop()
-        
-        // Reset internal state
         playbackFormat = nil
         logger("Audio playback stopped")
     }
-    
     
     // MARK: - Helpers
     
