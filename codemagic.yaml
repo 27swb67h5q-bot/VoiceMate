@@ -18,37 +18,62 @@ workflows:
             build
       - name: Package IPA for TrollStore
         script: |
-          # Find .app
-          APP_PATH=$(find "$HOME/Library/Developer/Xcode/DerivedData" -name "VoiceMate.app" -path "*/Release-iphoneos/*" | head -1)
-          echo "App: $APP_PATH"
+          # Find .app bundle
+          APP_PATH=$(find "$HOME/Library/Developer/Xcode/DerivedData" -name "VoiceMate.app" -path "*/Release-iphoneos/*" -type d | head -1)
+          echo "App path: $APP_PATH"
 
-          # Create Frameworks directory inside .app
-          mkdir -p "$APP_PATH/Frameworks"
-
-          # Find and copy all .framework files from PackageFrameworks
-          PKG_FW="$HOME/Library/Developer/Xcode/DerivedData/VoiceMate-*/Build/Products/Release-iphoneos/PackageFrameworks"
-          for fw_dir in $(ls -d $PKG_FW/*.framework 2>/dev/null); do
-            fw_name=$(basename "$fw_dir")
-            echo "Embedding: $fw_name"
-            cp -R "$fw_dir" "$APP_PATH/Frameworks/"
-          done
-
-          # Also search for WebRTC specifically
-          WEBRTC=$(find "$HOME/Library/Developer/Xcode/DerivedData" -name "WebRTC.framework" -path "*/Release-iphoneos/*" 2>/dev/null | head -1)
-          if [ -n "$WEBRTC" ] && [ ! -d "$APP_PATH/Frameworks/WebRTC.framework" ]; then
-            echo "Embedding WebRTC from: $WEBRTC"
-            cp -R "$WEBRTC" "$APP_PATH/Frameworks/"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "ERROR: .app bundle not found"
+            exit 1
           fi
 
-          ls -la "$APP_PATH/Frameworks/" 2>/dev/null || echo "No Frameworks dir"
+          # Ensure Frameworks directory exists
+          mkdir -p "$APP_PATH/Frameworks"
 
-          # Package IPA
+          # Find PackageFrameworks (where SPM puts dynamic frameworks)
+          PKG_FW_DIR=$(find "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "PackageFrameworks" -path "*/Release-iphoneos/*" 2>/dev/null | head -1)
+          echo "PackageFrameworks dir: $PKG_FW_DIR"
+
+          if [ -n "$PKG_FW_DIR" ]; then
+            echo "==> Copying all frameworks from PackageFrameworks..."
+            for fw in "$PKG_FW_DIR"/*.framework; do
+              [ -d "$fw" ] || continue
+              fw_name=$(basename "$fw")
+              echo "  Embedding: $fw_name"
+              rm -rf "$APP_PATH/Frameworks/$fw_name"
+              cp -Rf "$fw" "$APP_PATH/Frameworks/"
+            done
+          else
+            echo "WARNING: PackageFrameworks directory not found at expected path"
+            echo "==> Searching for WebRTC.framework anywhere in DerivedData..."
+          fi
+
+          # Ensure WebRTC.framework is present (fallback if PackageFrameworks path differs)
+          if [ ! -d "$APP_PATH/Frameworks/WebRTC.framework" ]; then
+            WEBRTC=$(find "$HOME/Library/Developer/Xcode/DerivedData" -name "WebRTC.framework" -type d 2>/dev/null | head -1)
+            if [ -n "$WEBRTC" ]; then
+              echo "  Embedding WebRTC.framework (fallback) from: $WEBRTC"
+              cp -Rf "$WEBRTC" "$APP_PATH/Frameworks/"
+            else
+              echo "ERROR: WebRTC.framework not found anywhere in DerivedData"
+              echo "LiveKit dependency may have failed to resolve or WebRTC is statically linked."
+              exit 1
+            fi
+          fi
+
+          echo "==> Frameworks in .app bundle:"
+          ls -la "$APP_PATH/Frameworks/" 2>/dev/null || echo "  (empty)"
+
+          # Package into IPA
+          echo "==> Packaging IPA..."
           cd /tmp
           rm -rf Payload
           mkdir -p Payload
-          cp -R "$APP_PATH" Payload/
-          zip -r "$HOME/clone/VoiceMate.ipa" Payload/
-          rm -rf Payload
-          echo "IPA ready"
+          cp -Rf "$APP_PATH" Payload/
+          IPA_PATH="${CM_BUILD_DIR:-$HOME/clone}/VoiceMate.ipa"
+          rm -f "$IPA_PATH"
+          cd Payload && zip -r "$IPA_PATH" . -q
+          cd /tmp && rm -rf Payload
+          echo "IPA ready at: $IPA_PATH"
     artifacts:
       - VoiceMate.ipa

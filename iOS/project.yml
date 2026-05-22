@@ -36,3 +36,19 @@ targets:
     dependencies:
       - package: LiveKit
         product: LiveKit
+
+    postCompileScripts:
+      - name: Embed SPM Dynamic Frameworks
+        script: |
+          DERIVED_DIR="${BUILT_PRODUCTS_DIR}/PackageFrameworks"
+          APP_FRAMEWORKS_DIR="${BUILT_PRODUCTS_DIR}/${FRAMEWORKS_FOLDER_PATH}"
+          mkdir -p "$APP_FRAMEWORKS_DIR"
+          if [ -d "$DERIVED_DIR" ]; then
+            for fw in "$DERIVED_DIR"/*.framework; do
+              [ -d "$fw" ] || continue
+              fw_name=$(basename "$fw")
+              echo "Embedding SPM framework: $fw_name"
+              rm -rf "$APP_FRAMEWORKS_DIR/$fw_name"
+              cp -Rf "$fw" "$APP_FRAMEWORKS_DIR/"
+            done
+          fi

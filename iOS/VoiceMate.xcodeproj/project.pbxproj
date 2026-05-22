@@ -41,6 +41,7 @@
 				<string>EHJRGC4A7SQGP46QOBKMNNO8</string>
 				<string>UPA3LGI3P6D6FZW3LZ2HOZUM</string>
 				<string>F47B4F904D3D44AC8E6FCA5F</string>
+				<string>B3833C608F1DB92901D99168</string>
 				<string>ZX37FKKHXPUFX89V8GFS47TQ</string>
 			</array>
 			<key>buildRules</key>
@@ -388,6 +389,44 @@
 			<string>PBXFrameworksBuildPhase</string>
 			<key>runOnlyForDeploymentPostprocessing</key>
 			<integer>0</integer>
+		</dict>
+		<key>B3833C608F1DB92901D99168</key>
+		<dict>
+			<key>buildActionMask</key>
+			<string>2147483647</string>
+			<key>files</key>
+			<array/>
+			<key>inputFileListPaths</key>
+			<array/>
+			<key>inputPaths</key>
+			<array/>
+			<key>isa</key>
+			<string>PBXShellScriptBuildPhase</string>
+			<key>name</key>
+			<string>Embed SPM Dynamic Frameworks</string>
+			<key>outputFileListPaths</key>
+			<array/>
+			<key>outputPaths</key>
+			<array/>
+			<key>runOnlyForDeploymentPostprocessing</key>
+			<integer>0</integer>
+			<key>shellPath</key>
+			<string>/bin/sh</string>
+			<key>shellScript</key>
+			<string>#!/bin/bash
+# Automatically embed Swift Package Manager dynamic frameworks into .app bundle
+DERIVED_DIR="${BUILT_PRODUCTS_DIR}/PackageFrameworks"
+APP_FRAMEWORKS_DIR="${BUILT_PRODUCTS_DIR}/${FRAMEWORKS_FOLDER_PATH}"
+mkdir -p "$APP_FRAMEWORKS_DIR"
+if [ -d "$DERIVED_DIR" ]; then
+  for fw in "$DERIVED_DIR"/*.framework; do
+    [ -d "$fw" ] || continue
+    fw_name=$(basename "$fw")
+    echo "Embedding SPM framework: $fw_name"
+    rm -rf "$APP_FRAMEWORKS_DIR/$fw_name"
+    cp -Rf "$fw" "$APP_FRAMEWORKS_DIR/"
+  done
+fi</string>
 		</dict>
 		<key>VTE0L6JAJEGK0GPL6JFKBLDB</key>
 		<dict>
