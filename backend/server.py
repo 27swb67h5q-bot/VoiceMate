@@ -1157,18 +1157,15 @@ _load_clone_db()
 
 # ── Real-Time Voice Conversation (Full-Duplex) ──────────────────────────────
 
-import struct
-import math
 
-# Adaptive VAD: energy-based silence detection with noise floor tracking
-_NOISE_FLOOR = None         # adaptive noise floor, updated during silence periods
-NOISE_FLOOR_ALPHA = 0.05    # EMA decay for noise floor updates (slow to avoid speech contamination)
-NOISE_FLOOR_MIN = 20.0      # minimum noise floor (pure silence floor, not threshold)
-VAD_MARGIN_DB = 12          # dB above noise floor to count as speech (~16x energy)
+# WebRTC VAD configuration
+import webrtcvad
+VAD_FRAME_MS = 30           # webrtcvad requires 10/20/30ms frames; 30ms = 480 bytes at 16kHz 16-bit
 SILENCE_DURATION_MS = 600   # ms of silence before considering utterance complete (reduced from 1500)
 MIN_UTTERANCE_MS = 500     # minimum utterance length to process (ms)
 SAMPLE_RATE = 16000        # iOS sends 16kHz PCM16 mono
 BYTES_PER_SAMPLE = 2
+
 
 async def _stream_tts_to_websocket(websocket, text: str, voice=None, speed_ratio=None):
     """Generate TTS audio and stream it as PCM chunks via WebSocket.
@@ -1227,43 +1224,6 @@ async def _stream_tts_to_websocket(websocket, text: str, voice=None, speed_ratio
     await websocket.send_json({"type": "audio_end"})
 
 
-def _calc_rms(pcm_chunk: bytes) -> float:
-    """Calculate RMS energy from PCM16 mono bytes."""
-    if len(pcm_chunk) < 2:
-        return 0.0
-    count = len(pcm_chunk) // 2
-    # Unpack as signed 16-bit integers
-    samples = struct.unpack_from('<' + 'h' * count, pcm_chunk)
-    sum_sq = sum(s * s for s in samples)
-    return math.sqrt(sum_sq / count)
-
-
-def _vad_is_speech(rms: float) -> bool:
-    """Adaptive VAD: compare RMS against dynamic noise floor.
-
-    The noise floor tracks background noise via EMA during non-speech.
-    A signal is speech if its RMS is VAD_MARGIN_DB dB above the floor,
-    computed as energy ratio: threshold = floor * (10^(margin/10)).
-
-    Args:
-        rms: RMS energy of current audio chunk
-    Returns:
-        True if the chunk contains speech, False otherwise
-    """
-    global _NOISE_FLOOR
-    margin_ratio = 10 ** (VAD_MARGIN_DB / 10)  # e.g. 12dB → ~15.8x
-    threshold = (_NOISE_FLOOR if _NOISE_FLOOR is not None else NOISE_FLOOR_MIN) * margin_ratio
-    return rms >= threshold
-
-
-def _update_noise_floor(rms: float):
-    """Update adaptive noise floor via EMA during detected silence."""
-    global _NOISE_FLOOR
-    if _NOISE_FLOOR is None:
-        _NOISE_FLOOR = max(rms, NOISE_FLOOR_MIN)
-    else:
-        _NOISE_FLOOR = (1 - NOISE_FLOOR_ALPHA) * _NOISE_FLOOR + NOISE_FLOOR_ALPHA * max(rms, NOISE_FLOOR_MIN)
-
 
 # ── Full-Duplex Voice WebSocket ──────────────────────────────────────────
 
@@ -1305,8 +1265,9 @@ async def ws_voice_realtime(websocket: WebSocket):
     voice = None
     speed = None
     
-    # VAD state
-    audio_buffer = bytearray()      # accumulates PCM16 16kHz audio
+    # VAD state (WebRTC VAD)
+    vad = webrtcvad.Vad(mode=2)
+    vad_buffer = bytearray()        # PCM buffer to accumulate VAD frame (480 bytes for 30ms @ 16kHz)
     silence_frames = 0              # consecutive silent frames
     silence_duration_ms = 0.0       # accumulated silence duration (ms)
     utterance_active = False        # currently in an utterance
@@ -1461,49 +1422,53 @@ async def ws_voice_realtime(websocket: WebSocket):
             if msg_bytes is not None:
                 pcm_chunk = msg_bytes
                 
-                # Calculate VAD
-                rms = _calc_rms(pcm_chunk)
-                is_speech = _vad_is_speech(rms)
+                # Feed into WebRTC VAD buffer
+                vad_buffer.extend(pcm_chunk)
                 
-                if is_speech:
-                    # Energy detected: reset silence counter, accumulate
-                    if not utterance_active:
-                        logger.info(f"VAD: speech detected [{conv_id}] (RMS={rms:.1f})")
-                    silence_frames = 0
-                    silence_duration_ms = 0.0
-                    utterance_active = True
-                    utterance_buffer.extend(pcm_chunk)
-                elif utterance_active:
-                    # Silence during utterance: accumulate actual silence duration
-                    silence_frames += 1
-                    utterance_buffer.extend(pcm_chunk)
-                    # Update noise floor during silence-in-utterance (helps if noise rose mid-call)
-                    _update_noise_floor(rms)
+                # Webrtcvad requires exact 30ms frames (480 bytes at 16kHz 16-bit mono)
+                vad_frame_size = VAD_FRAME_MS * SAMPLE_RATE // 1000 * BYTES_PER_SAMPLE  # 480
+                
+                # Process complete VAD frames from buffer
+                while len(vad_buffer) >= vad_frame_size:
+                    frame = bytes(vad_buffer[:vad_frame_size])
+                    vad_buffer = bytearray(vad_buffer[vad_frame_size:])
                     
-                    # Compute actual duration of this chunk (in ms)
-                    chunk_samples = len(pcm_chunk) // BYTES_PER_SAMPLE
-                    chunk_duration_ms = (chunk_samples / SAMPLE_RATE) * 1000.0
-                    silence_duration_ms += chunk_duration_ms
+                    is_speech = vad.is_speech(frame, SAMPLE_RATE)
                     
-                    # Check if silence is long enough to end utterance
-                    if silence_duration_ms >= SILENCE_DURATION_MS:
-                        # Utterance complete
-                        logger.info(f"VAD: utterance end after {silence_duration_ms:.0f}ms silence, {len(utterance_buffer)}B [{conv_id}]")
-                        if ai_speaking:
-                            # User started speaking while AI was talking -> barge-in
-                            await handle_barge_in()
-                        
-                        # Process the utterance
-                        await process_utterance(bytes(utterance_buffer))
-                        
-                        # Reset
-                        utterance_active = False
-                        utterance_buffer = bytearray()
+                    # Compute actual duration of this frame (in ms)
+                    chunk_duration_ms = float(VAD_FRAME_MS)
+                    
+                    if is_speech:
+                        # Speech detected: reset silence counter, accumulate
+                        if not utterance_active:
+                            logger.info(f"VAD: speech detected [{conv_id}]")
                         silence_frames = 0
                         silence_duration_ms = 0.0
-                else:
-                    # Silence while not in utterance: update noise floor
-                    _update_noise_floor(rms)
+                        utterance_active = True
+                        utterance_buffer.extend(frame)
+                    elif utterance_active:
+                        # Silence during utterance: accumulate silence duration
+                        silence_frames += 1
+                        utterance_buffer.extend(frame)
+                        silence_duration_ms += chunk_duration_ms
+                        
+                        # Check if silence is long enough to end utterance
+                        if silence_duration_ms >= SILENCE_DURATION_MS:
+                            # Utterance complete
+                            logger.info(f"VAD: utterance end after {silence_duration_ms:.0f}ms silence, {len(utterance_buffer)}B [{conv_id}]")
+                            if ai_speaking:
+                                # User started speaking while AI was talking -> barge-in
+                                await handle_barge_in()
+                            
+                            # Process the utterance
+                            await process_utterance(bytes(utterance_buffer))
+                            
+                            # Reset
+                            utterance_active = False
+                            utterance_buffer = bytearray()
+                            silence_frames = 0
+                            silence_duration_ms = 0.0
+                    # else: silence while not in utterance -> discard
                 
                 continue
             
