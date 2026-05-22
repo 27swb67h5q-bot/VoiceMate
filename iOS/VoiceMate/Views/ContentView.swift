@@ -487,11 +487,6 @@ struct ContentView: View {
                         lastAutoPlayedMessageId = msg.id
                     }
                     if let url = voiceService.audioURL(for: fallback.audioUrl) {
-                        await MainActor.run {
-                            if let idx = messages.firstIndex(where: { $0.id == fallback.conversationId }) {
-                                // Use a workaround: find by matching audioURL
-                            }
-                        }
                         // For fallback, find the message by iterating
                         let fbAudioUrl = fallback.audioUrl
                         await MainActor.run {
