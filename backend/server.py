@@ -1161,7 +1161,7 @@ import struct
 import math
 
 # Simple VAD: energy-based silence detection
-SILENCE_THRESHOLD = 2000    # RMS threshold for silence (increased from 300, PCM16 range 0-32767; only clear speech crosses this)
+SILENCE_THRESHOLD = 1200    # RMS threshold for silence (reduced from 2000; PCM16 range 0-32767; catches quiet speech at normal distance, still rejects non-speech noise)
 SILENCE_DURATION_MS = 1500  # ms of silence before considering utterance complete (increased from 800, reduces premature cut-off)
 MIN_UTTERANCE_MS = 500     # minimum utterance length to process (ms)
 SAMPLE_RATE = 16000        # iOS sends 16kHz PCM16 mono

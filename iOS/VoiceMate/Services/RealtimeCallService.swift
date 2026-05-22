@@ -89,17 +89,17 @@ class RealtimeCallService: NSObject, ObservableObject {
     // MARK: - Internal State
     private var isMicActive = false
     private var audioSampleRate: Double = 24000
-    private let vadThreshold: Float = 0.02
+    private let vadThreshold: Float = 0.008
     
     /// Number of consecutive frames above threshold to declare user speech
-    private let speechDebounceFrames: Int = 5
+    private let speechDebounceFrames: Int = 3
     
     /// Counter for consecutive frames above/below VAD threshold
     private var speechFrameCount: Int = 0
     private var silenceFrameCount: Int = 0
     
     /// Frames of silence before releasing the "user speaking" state
-    private let silenceReleaseFrames: Int = 4
+    private let silenceReleaseFrames: Int = 6
     
     /// Running baseline RMS over the last N frames (adaptive floor)
     private var rmsHistory: [Float] = []
@@ -113,10 +113,10 @@ class RealtimeCallService: NSObject, ObservableObject {
     private var spectralProfileFrameCount: Int = 0
     
     /// Frames of user speech needed before we trust spectral matching
-    private let spectralProfileWarmupFrames: Int = 20  // ~1 second of speech
+    private let spectralProfileWarmupFrames: Int = 10  // ~0.5 seconds of speech
     
     /// Maximum cosine distance to accept a frame as matching the user's spectral profile
-    private let spectralMatchThreshold: Float = 0.4
+    private let spectralMatchThreshold: Float = 0.6
     
     /// Whether voice isolation / voice processing is available
     private var supportsVoiceIsolation: Bool = false
@@ -962,7 +962,7 @@ class RealtimeCallService: NSObject, ObservableObject {
         let dynamicRange = max(recentMax - noiseFloor, 0.001)
         // When the mic is held close, the closest peaks are ~10x the noise floor.
         // Use a multiplier of 1.0 for quiet, up to ~3.0 for close-proximity.
-        adaptiveThresholdMultiplier = min(3.0, max(1.0, dynamicRange / 0.05))
+        adaptiveThresholdMultiplier = min(2.0, max(1.0, dynamicRange / 0.03))
         let effectiveThreshold = max(adaptiveFloor, vadThreshold * adaptiveThresholdMultiplier)
         
         // 3. Check if current frame exceeds threshold (basic energy test)
