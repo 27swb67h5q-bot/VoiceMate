@@ -20,12 +20,14 @@ workflows:
         script: |
           APP_PATH=$(find "$HOME/Library/Developer/Xcode/DerivedData" -name "VoiceMate.app" -path "*/Release-iphoneos/*" | head -1)
           echo "Found app at: $APP_PATH"
+          ls "$APP_PATH"
+          cd /tmp
+          rm -rf Payload
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
-          cd Payload
-          zip -r ../VoiceMate.ipa VoiceMate.app
-          cd ..
+          ls Payload/
+          zip -r "$HOME/clone/VoiceMate.ipa" Payload/
           rm -rf Payload
-          echo "IPA created: $(pwd)/VoiceMate.ipa"
+          echo "IPA created at $HOME/clone/VoiceMate.ipa"
     artifacts:
       - VoiceMate.ipa
