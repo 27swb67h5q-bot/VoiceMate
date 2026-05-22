@@ -81,6 +81,9 @@ class RealtimeCallService: NSObject, ObservableObject {
     private var playbackEverStarted = false
 
     private var playbackFormat: AVAudioFormat?
+    /// Observer token for AVAudioSession route change notifications
+    private var routeChangeObserver: NSObjectProtocol?
+
     /// Dedicated mixer node to avoid reconnecting to mainMixer on a running engine
     private var playbackMixerNode: AVAudioMixerNode?
     /// Callback invoked per-turn when a complete user or AI utterance is done
@@ -118,6 +121,11 @@ class RealtimeCallService: NSObject, ObservableObject {
     /// Maximum cosine distance to accept a frame as matching the user's spectral profile
     private let spectralMatchThreshold: Float = 0.6
     
+    /// Minimum consecutive VAD frames required during AI playback to trigger barge-in
+    private let bargeInDebounceFrames: Int = 6  // ~300ms at 50ms frames
+    /// Barge-in debounce counter: consecutive VAD-positive frames during AI playback
+    private var bargeInDebounceCount: Int = 0
+
     /// Whether voice isolation / voice processing is available
     private var supportsVoiceIsolation: Bool = false
     
@@ -160,6 +168,7 @@ class RealtimeCallService: NSObject, ObservableObject {
         
         // Configure audio session once at init time — do not reconfigure during call
         configureAudioSession()
+        setupRouteChangeObserver()
     }
     
     deinit {
@@ -211,7 +220,27 @@ class RealtimeCallService: NSObject, ObservableObject {
             }
         }
     }
-    
+
+
+
+    /// Listen for audio route changes and re-apply speaker override.
+    /// iOS resets overrideOutputAudioPort(.speaker) on route changes.
+    private func setupRouteChangeObserver() {
+        routeChangeObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main
+        ) { [weak self] _ in
+            guard let self = self else { return }
+            do {
+                try AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker)
+            } catch {
+                self.logger("Failed to re-apply speaker override on route change: \(error)")
+            }
+        }
+        logger("Route change observer registered")
+    }
+
     // MARK: - Call Lifecycle
     
     func startCall() {
@@ -248,6 +277,7 @@ class RealtimeCallService: NSObject, ObservableObject {
         userSpectralProfile = nil
         spectralProfileFrameCount = 0
         adaptiveThresholdMultiplier = 1.0
+        bargeInDebounceCount = 0
         
         // Stop capture first (stops the audio engine), then detach player node.
         stopAudioCapture()
@@ -283,6 +313,13 @@ class RealtimeCallService: NSObject, ObservableObject {
         pingTimer = nil
         reconnectTimer?.invalidate()
         reconnectTimer = nil
+
+        // Remove route change observer
+        if let observer = routeChangeObserver {
+            NotificationCenter.default.removeObserver(observer)
+            routeChangeObserver = nil
+        }
+
         
         // Do NOT deactivate the audio session — it was configured at init time.
         // Deactivating can cause issues if the user starts another call quickly.
@@ -443,6 +480,7 @@ class RealtimeCallService: NSObject, ObservableObject {
             
             case "audio_start":
                 self.isAISpeaking = true
+                self.bargeInDebounceCount = 0
                 self.isUserSpeaking = false
                 if let sr = json["sample_rate"] as? Double {
                     self.audioSampleRate = sr
@@ -471,10 +509,13 @@ class RealtimeCallService: NSObject, ObservableObject {
                 self.onAudioEnd()
             
             case "turn_done":
+                // Reset barge-in debounce state
+                self.bargeInDebounceCount = 0
                 self.handleTurnDone()
             
             case "interrupted":
                 self.isAISpeaking = false
+                self.bargeInDebounceCount = 0
                 self.stopPlaybackInternal()
             
             case "timeout":
@@ -723,15 +764,22 @@ class RealtimeCallService: NSObject, ObservableObject {
                 // Advanced VAD for user speech detection
                 let rms = self.calculateRMS(from: buffer)
                 let spectralBands = self.computeSpectralBands(from: buffer)
-                let vadDecision = self.evaluateVAD(rms: rms, spectralBands: spectralBands)
+                let vadDecision = self.evaluateVAD(rms: rms, spectralBands: spectralBands, isAISpeaking: self.isAISpeaking)
                 
                 DispatchQueue.main.async {
                     self.isUserSpeaking = vadDecision
                 }
                 
-                // Client-side barge-in detection (require sustained speech)
+                // Client-side barge-in detection: only trigger when VAD detects speech
+                // AND AI is currently speaking. During calm periods, the server handles turn-taking.
                 if vadDecision && self.isAISpeaking {
-                    self.sendJson(["type": "barge_in"])
+                    self.bargeInDebounceCount += 1
+                    if self.bargeInDebounceCount >= self.bargeInDebounceFrames {
+                        self.sendJson(["type": "barge_in"])
+                        self.bargeInDebounceCount = 0
+                    }
+                } else {
+                    self.bargeInDebounceCount = 0
                 }
             }
         }
@@ -948,7 +996,7 @@ class RealtimeCallService: NSObject, ObservableObject {
     
     /// Evaluate VAD using sustained speech + spectral matching + adaptive threshold.
     /// Returns true only when confident the user is speaking.
-    private func evaluateVAD(rms: Float, spectralBands: [Float]) -> Bool {
+    private func evaluateVAD(rms: Float, spectralBands: [Float], isAISpeaking: Bool = false) -> Bool {
         // 1. Update RMS history for adaptive baseline
         rmsHistory.append(rms)
         if rmsHistory.count > rmsHistorySize {
@@ -970,9 +1018,15 @@ class RealtimeCallService: NSObject, ObservableObject {
         // Use a multiplier of 1.0 for quiet, up to ~3.0 for close-proximity.
         adaptiveThresholdMultiplier = min(2.0, max(1.0, dynamicRange / 0.03))
         let effectiveThreshold = max(adaptiveFloor, vadThreshold * adaptiveThresholdMultiplier)
+
+        // When AI is speaking (TTS playing through speaker), the mic picks up
+        // the playback audio which can falsely trigger VAD. Apply a higher
+        // threshold so only genuinely loud user speech passes through.
+        let aiPlaybackThresholdMultiplier: Float = isAISpeaking ? 4.0 : 1.0
+        let finalThreshold = effectiveThreshold * aiPlaybackThresholdMultiplier
         
         // 3. Check if current frame exceeds threshold (basic energy test)
-        let aboveEnergyThreshold = rms > effectiveThreshold
+        let aboveEnergyThreshold = rms > finalThreshold
         
         // 4. Spectral matching against user voice profile (if warm)
         var spectralMatch = true

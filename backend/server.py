@@ -1160,9 +1160,12 @@ _load_clone_db()
 import struct
 import math
 
-# Simple VAD: energy-based silence detection
-SILENCE_THRESHOLD = 1200    # RMS threshold for silence (reduced from 2000; PCM16 range 0-32767; catches quiet speech at normal distance, still rejects non-speech noise)
-SILENCE_DURATION_MS = 1500  # ms of silence before considering utterance complete (increased from 800, reduces premature cut-off)
+# Adaptive VAD: energy-based silence detection with noise floor tracking
+_NOISE_FLOOR = None         # adaptive noise floor, updated during silence periods
+NOISE_FLOOR_ALPHA = 0.05    # EMA decay for noise floor updates (slow to avoid speech contamination)
+NOISE_FLOOR_MIN = 20.0      # minimum noise floor (pure silence floor, not threshold)
+VAD_MARGIN_DB = 12          # dB above noise floor to count as speech (~16x energy)
+SILENCE_DURATION_MS = 600   # ms of silence before considering utterance complete (reduced from 1500)
 MIN_UTTERANCE_MS = 500     # minimum utterance length to process (ms)
 SAMPLE_RATE = 16000        # iOS sends 16kHz PCM16 mono
 BYTES_PER_SAMPLE = 2
@@ -1233,6 +1236,33 @@ def _calc_rms(pcm_chunk: bytes) -> float:
     samples = struct.unpack_from('<' + 'h' * count, pcm_chunk)
     sum_sq = sum(s * s for s in samples)
     return math.sqrt(sum_sq / count)
+
+
+def _vad_is_speech(rms: float) -> bool:
+    """Adaptive VAD: compare RMS against dynamic noise floor.
+
+    The noise floor tracks background noise via EMA during non-speech.
+    A signal is speech if its RMS is VAD_MARGIN_DB dB above the floor,
+    computed as energy ratio: threshold = floor * (10^(margin/10)).
+
+    Args:
+        rms: RMS energy of current audio chunk
+    Returns:
+        True if the chunk contains speech, False otherwise
+    """
+    global _NOISE_FLOOR
+    margin_ratio = 10 ** (VAD_MARGIN_DB / 10)  # e.g. 12dB → ~15.8x
+    threshold = (_NOISE_FLOOR if _NOISE_FLOOR is not None else NOISE_FLOOR_MIN) * margin_ratio
+    return rms >= threshold
+
+
+def _update_noise_floor(rms: float):
+    """Update adaptive noise floor via EMA during detected silence."""
+    global _NOISE_FLOOR
+    if _NOISE_FLOOR is None:
+        _NOISE_FLOOR = max(rms, NOISE_FLOOR_MIN)
+    else:
+        _NOISE_FLOOR = (1 - NOISE_FLOOR_ALPHA) * _NOISE_FLOOR + NOISE_FLOOR_ALPHA * max(rms, NOISE_FLOOR_MIN)
 
 
 # ── Full-Duplex Voice WebSocket ──────────────────────────────────────────
@@ -1433,9 +1463,9 @@ async def ws_voice_realtime(websocket: WebSocket):
                 
                 # Calculate VAD
                 rms = _calc_rms(pcm_chunk)
-                is_silent = rms < SILENCE_THRESHOLD
+                is_speech = _vad_is_speech(rms)
                 
-                if not is_silent:
+                if is_speech:
                     # Energy detected: reset silence counter, accumulate
                     if not utterance_active:
                         logger.info(f"VAD: speech detected [{conv_id}] (RMS={rms:.1f})")
@@ -1447,6 +1477,8 @@ async def ws_voice_realtime(websocket: WebSocket):
                     # Silence during utterance: accumulate actual silence duration
                     silence_frames += 1
                     utterance_buffer.extend(pcm_chunk)
+                    # Update noise floor during silence-in-utterance (helps if noise rose mid-call)
+                    _update_noise_floor(rms)
                     
                     # Compute actual duration of this chunk (in ms)
                     chunk_samples = len(pcm_chunk) // BYTES_PER_SAMPLE
@@ -1469,7 +1501,9 @@ async def ws_voice_realtime(websocket: WebSocket):
                         utterance_buffer = bytearray()
                         silence_frames = 0
                         silence_duration_ms = 0.0
-                # else: silence while not in utterance -> do nothing
+                else:
+                    # Silence while not in utterance: update noise floor
+                    _update_noise_floor(rms)
                 
                 continue
             
