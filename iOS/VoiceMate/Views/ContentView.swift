@@ -33,6 +33,9 @@ struct ContentView: View {
     @State private var proactiveTimer: Timer? = nil
     @AppStorage("proactive_enabled") private var proactiveEnabled = true
     
+    // Auto-play tracking: prevents replaying the same audio message
+    @State private var lastAutoPlayedMessageId: UUID?
+    
     // Real-time call
     @State private var showRealtimeCall = false
     
@@ -454,7 +457,19 @@ struct ContentView: View {
                     if let emotion = r.emotion { showEmotion = emotion }
                 }
                 if let url = voiceService.audioURL(for: r.audioUrl) {
+                    // Mark as playing and auto-play
+                    await MainActor.run {
+                        if let idx = messages.firstIndex(where: { $0.id == aiId }) {
+                            messages[idx].isPlaying = true
+                            lastAutoPlayedMessageId = aiId
+                        }
+                    }
                     try? await voiceService.playAudio(from: url, remotePath: r.audioUrl)
+                    await MainActor.run {
+                        if let idx = messages.firstIndex(where: { $0.id == aiId }) {
+                            messages[idx].isPlaying = false
+                        }
+                    }
                 }
             } catch {
                 // WebSocket failed - fall back to REST API
@@ -469,9 +484,27 @@ struct ContentView: View {
                         let msg = ChatMessage(id: UUID(), isUser: false, text: fallback.replyText, audioURL: fallback.audioUrl, timestamp: Date(), duration: TimeInterval(fallback.durationMs) / 1000.0)
                         messages.append(msg)
                         saveMessages()
+                        lastAutoPlayedMessageId = msg.id
                     }
                     if let url = voiceService.audioURL(for: fallback.audioUrl) {
+                        await MainActor.run {
+                            if let idx = messages.firstIndex(where: { $0.id == fallback.conversationId }) {
+                                // Use a workaround: find by matching audioURL
+                            }
+                        }
+                        // For fallback, find the message by iterating
+                        let fbAudioUrl = fallback.audioUrl
+                        await MainActor.run {
+                            if let idx = messages.firstIndex(where: { $0.audioURL == fbAudioUrl }) {
+                                messages[idx].isPlaying = true
+                            }
+                        }
                         try? await voiceService.playAudio(from: url, remotePath: fallback.audioUrl)
+                        await MainActor.run {
+                            if let idx = messages.firstIndex(where: { $0.audioURL == fbAudioUrl }) {
+                                messages[idx].isPlaying = false
+                            }
+                        }
                     }
                 }
             }
@@ -503,7 +536,19 @@ struct ContentView: View {
                 if let emotion = r.emotion { showEmotion = emotion }
             }
             if let url = voiceService.audioURL(for: r.audioUrl) {
+                // Auto-play with isPlaying state tracking
+                await MainActor.run {
+                    if let idx = messages.firstIndex(where: { $0.id == aiId }) {
+                        messages[idx].isPlaying = true
+                        lastAutoPlayedMessageId = aiId
+                    }
+                }
                 try? await voiceService.playAudio(from: url, remotePath: r.audioUrl)
+                await MainActor.run {
+                    if let idx = messages.firstIndex(where: { $0.id == aiId }) {
+                        messages[idx].isPlaying = false
+                    }
+                }
             }
         } catch {
             await MainActor.run { streamingMessageId = nil }
@@ -517,6 +562,19 @@ struct ContentView: View {
                     messages.append(m)
                     saveMessages()
                     if let emotion = fb.emotion { showEmotion = emotion }
+                }
+                if let url = voiceService.audioURL(for: fb.audioUrl) {
+                    await MainActor.run {
+                        if let idx = messages.firstIndex(where: { $0.audioURL == fb.audioUrl }) {
+                            messages[idx].isPlaying = true
+                        }
+                    }
+                    try? await voiceService.playAudio(from: url, remotePath: fb.audioUrl)
+                    await MainActor.run {
+                        if let idx = messages.firstIndex(where: { $0.audioURL == fb.audioUrl }) {
+                            messages[idx].isPlaying = false
+                        }
+                    }
                 }
             }
         }

@@ -112,14 +112,31 @@ class VoiceMateService: ObservableObject {
             try data.write(to: localURL)
         }
         
-        await MainActor.run {
-            // Route audio to speaker (not earpiece)
-            try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
-            try? AVAudioSession.sharedInstance().setActive(true)
+        try await MainActor.run { @MainActor in
+            // Stop any previous playback first
+            self.audioPlayer?.stop()
+            self.audioPlayer = nil
             
-            self.audioPlayer = try? AVAudioPlayer(contentsOf: localURL)
-            self.audioPlayer?.prepareToPlay()
-            self.audioPlayer?.play()
+            // Route audio to speaker (not earpiece)
+            do {
+                try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [.defaultToSpeaker, .mixWithOthers])
+                try AVAudioSession.sharedInstance().setActive(true, options: .notifyOthersOnDeactivation)
+            } catch {
+                print("[VoiceMate] Audio session setup error: \(error)")
+            }
+            
+            do {
+                let player = try AVAudioPlayer(contentsOf: localURL)
+                player.prepareToPlay()
+                self.audioPlayer = player
+                guard player.play() else {
+                    print("[VoiceMate] AVAudioPlayer.play() returned false")
+                    throw VoiceMateError.audioPlaybackFailed
+                }
+            } catch {
+                print("[VoiceMate] AVAudioPlayer error: \(error)")
+                throw error
+            }
         }
     }
 
