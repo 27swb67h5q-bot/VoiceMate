@@ -16,5 +16,16 @@ workflows:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             build
+      - name: Package IPA for TrollStore
+        script: |
+          APP_PATH=$(find "$HOME/Library/Developer/Xcode/DerivedData" -name "VoiceMate.app" -path "*/Release-iphoneos/*" | head -1)
+          echo "Found app at: $APP_PATH"
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          cd Payload
+          zip -r ../VoiceMate.ipa VoiceMate.app
+          cd ..
+          rm -rf Payload
+          echo "IPA created: $(pwd)/VoiceMate.ipa"
     artifacts:
-      - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.app
+      - VoiceMate.ipa
