@@ -15,7 +15,6 @@ struct ContentView: View {
     @State private var inputMode: InputMode = .voice
     @State private var textInput: String = ""
     @State private var streamingMessageId: UUID? = nil
-    @State private var showPlusMenu = false
     @State private var showEmotion: String? = nil
     @State private var emotionMessageId: UUID? = nil
     
@@ -74,7 +73,7 @@ struct ContentView: View {
             .sheet(isPresented: $showSettings) {
                 SettingsView(service: voiceService)
             }
-            .sheet(isPresented: $showRealtimeCall) {
+            .fullScreenCover(isPresented: $showRealtimeCall) {
                 RealtimeCallView(
                     serverHost: voiceService.serverHost,
                     serverPort: voiceService.serverPort,
@@ -222,34 +221,18 @@ struct ContentView: View {
             Divider().background(Color.gray.opacity(0.3))
             
             HStack(spacing: 8) {
-                // "+" button with menu
-                Button(action: { showPlusMenu = true }) {
-                    Image(systemName: "plus.circle.fill")
-                        .font(.title2)
-                        .foregroundColor(.gray)
-                }
-                .confirmationDialog("更多功能", isPresented: $showPlusMenu) {
-                    Button("实时通话", systemImage: "phone.fill") { showRealtimeCall = true }
-                    Button("取消", role: .cancel) { }
-                } message: {
-                    Text("选择功能")
-                }
-                
                 if inputMode == .text {
                     // Text input field
                     textFieldArea
                 } else {
                     // Voice recording button ("按住 说话")
+                    // Tap → switch to text mode, Long press → record voice
                     voiceButtonArea
                 }
                 
-                // Toggle button (switch between text/voice)
-                Button(action: {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        inputMode = inputMode == .text ? .voice : .text
-                    }
-                }) {
-                    Image(systemName: inputMode == .text ? "mic.fill" : "keyboard.fill")
+                // Real-time call button
+                Button(action: { showRealtimeCall = true }) {
+                    Image(systemName: "phone.fill")
                         .font(.system(size: 16))
                         .foregroundColor(.white)
                         .frame(width: 32, height: 32)
@@ -293,8 +276,9 @@ struct ContentView: View {
     
     private var voiceButtonArea: some View {
         Button(action: {
-            if audioService.isRecording {
-                Task { await sendRecording() }
+            // Tap → switch to text input mode
+            withAnimation(.easeInOut(duration: 0.2)) {
+                inputMode = .text
             }
         }) {
             Text(audioService.isRecording ? "松开 发送" : "按住 说话")
