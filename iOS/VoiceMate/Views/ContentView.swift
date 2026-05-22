@@ -440,12 +440,8 @@ struct ContentView: View {
         let text = textInput.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         textInput = ""
-        
-        // Forcefully resign first responder to prevent @FocusState from becoming orphaned.
-        // After .onSubmit + async state mutations, SwiftUI can lose the FocusState binding,
-        // causing the keyboard to never reappear on subsequent taps.
-        isTextFieldFocused = false
-        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        // Keep keyboard focused so the user can type the next message immediately.
+        isTextFieldFocused = true
         
         let user = ChatMessage(id: UUID(), isUser: true, text: text, audioURL: nil, timestamp: Date())
         messages.append(user)
