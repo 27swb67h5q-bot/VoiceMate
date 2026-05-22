@@ -225,16 +225,13 @@ struct ContentView: View {
             Divider().background(Color.gray.opacity(0.3))
             
             HStack(spacing: 8) {
-                // Always render both views together so @FocusState binding is never orphaned.
-                // This fixes the bug where keyboard won't reappear after dismissal via '完成' or tap-blank.
-                ZStack {
+                if inputMode == .text {
+                    // Text input field
                     textFieldArea
-                        .opacity(inputMode == .text ? 1 : 0)
-                        .allowsHitTesting(inputMode == .text)
-                    
+                } else {
+                    // Voice recording button ("按住 说话")
+                    // Tap → switch to text mode, Long press → record voice
                     voiceButtonArea
-                        .opacity(inputMode == .voice ? 1 : 0)
-                        .allowsHitTesting(inputMode == .voice)
                 }
                 
                 // Real-time call button

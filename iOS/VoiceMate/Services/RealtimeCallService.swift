@@ -127,7 +127,6 @@ class RealtimeCallService: NSObject, ObservableObject {
     private var bargeInDebounceCount: Int = 0
 
     /// Whether voice isolation / voice processing is available
-    private var supportsVoiceIsolation: Bool = false
     
     /// Adaptive threshold multiplier based on mic proximity heuristic
     private var adaptiveThresholdMultiplier: Float = 1.0
@@ -187,36 +186,29 @@ class RealtimeCallService: NSObject, ObservableObject {
     // MARK: - Audio Session Configuration
     
     /// Configure audio session once. Called at init time.
-    /// On iOS 16.x, reconfiguring the audio session (especially .voiceChat mode or
-    /// overrideOutputAudioPort) while the engine is running can cause crashes.
-    /// We set everything up here and never change it during a call.
+    /// On iOS 16.x, reconfiguring the audio session while the engine is running can cause
+    /// crashes. We set everything up here and never change it during a call.
     private func configureAudioSession() {
         let audioSession = AVAudioSession.sharedInstance()
         do {
-            // Use .voiceChat mode for voice processing (noise suppression, voice isolation).
-            // On iOS 16.5+, this enables the system's built-in voice isolation.
-            // Fall back to .default if .voiceChat causes issues on older iOS.
+            // Use .default mode to ensure audio routes to the bottom speaker.
+            // .voiceChat mode overrides .defaultToSpeaker on many iOS versions
+            // and forces audio to the earpiece. We avoid it for that reason.
             try audioSession.setCategory(
                 .playAndRecord,
-                mode: .voiceChat,
+                mode: .default,
                 options: [.allowBluetoothHFP, .defaultToSpeaker]
             )
+            try audioSession.overrideOutputAudioPort(.speaker)
             try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
-            // .voiceChat mode enables built-in AEC (Acoustic Echo Cancellation).
-            // .defaultToSpeaker safely coexists with .voiceChat — AEC works at the
-            // mode level, not the port level. This routes audio to speaker while preserving AEC.
-
-            // Detect voice isolation support (iOS 16.5+)
-            supportsVoiceIsolation = audioSession.availableModes.contains(.voiceChat)
-            if supportsVoiceIsolation {
-                logger("Voice isolation mode is available and enabled")
-            }
+            logger("Audio session configured: .playAndRecord + .default mode + speaker override")
         } catch {
             logger("Failed to configure audio session: \(error)")
             // Fallback: try with .default mode
             if let fallbackSession = try? AVAudioSession.sharedInstance() {
                 let fs = fallbackSession
                 try? fs.setCategory(.playAndRecord, mode: .default, options: [.allowBluetoothHFP, .defaultToSpeaker])
+                try? fs.overrideOutputAudioPort(.speaker)
                 try? fs.setActive(true, options: .notifyOthersOnDeactivation)
             }
         }
