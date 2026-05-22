@@ -104,17 +104,15 @@ class LiveKitCallService: NSObject, ObservableObject {
             // Use default audio configuration; LiveKit manages VAD, AEC, etc.
             let audioOptions = AudioCaptureOptions(
                 echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: true
+                autoGainControl: true,
+                noiseSuppression: true
             )
             
             // 4. Connect with room options
             let roomOptions = RoomOptions(
                 defaultAudioCaptureOptions: audioOptions,
                 // Enable adaptive audio (LiveKit manages bitrate based on network)
-                adaptiveStream: true,
-                // Subscribe to all tracks automatically
-                defaultSubscribeOptions: SubscribeOptions(participantPublished: true)
+                adaptiveStream: true
             )
             
             try await room.connect(
@@ -124,7 +122,7 @@ class LiveKitCallService: NSObject, ObservableObject {
             )
             
             // 5. Publish microphone
-            try await room.localParticipant?.setMicrophone(enabled: true)
+            try await room.localParticipant.setMicrophone(enabled: true)
             
             // Mark the call as active
             DispatchQueue.main.async {
@@ -214,11 +212,11 @@ extension LiveKitCallService: RoomDelegate {
     }
     
     func room(_ room: Room, participantDidConnect participant: RemoteParticipant) {
-        logger("Remote participant joined: \(participant.identity ?? "unknown")")
+        logger("Remote participant joined: \(String(describing: participant.identity))")
     }
     
     func room(_ room: Room, participantDidDisconnect participant: RemoteParticipant) {
-        logger("Remote participant left: \(participant.identity ?? "unknown")")
+        logger("Remote participant left: \(String(describing: participant.identity))")
     }
     
     func room(_ room: Room, participant: RemoteParticipant, didSubscribeToTrack publication: RemoteTrackPublication) {
