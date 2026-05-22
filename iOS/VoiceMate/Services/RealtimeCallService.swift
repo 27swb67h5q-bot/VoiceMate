@@ -84,7 +84,6 @@ class RealtimeCallService: NSObject, ObservableObject {
     /// Callback invoked per-turn when a user utterance or AI reply completes
     var onTurnCompleted: ((_ isUser: Bool, _ text: String) -> Void)?
 
-    private var playbackFormat: AVAudioFormat?
     private var audioSampleRate: Double = 24000
     
     // MARK: - VAD (Simple energy-based for client-side barge-in)
@@ -511,7 +510,7 @@ class RealtimeCallService: NSObject, ObservableObject {
 
     private func handleAudioData(_ data: Data) {
         // PCM16 audio chunks from server — play via the single engine
-        guard let playerNode = playbackPlayerNode, let format = playbackFormat else {
+        guard let format = playbackFormat else {
             return
         }
         
