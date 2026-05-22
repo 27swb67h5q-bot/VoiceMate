@@ -1169,7 +1169,7 @@ import webrtcvad
 VAD_FRAME_MS = 30           # webrtcvad requires 10/20/30ms frames; 30ms = 480 bytes at 16kHz 16-bit
 VAD_NOISE_FLOOR_DECAY = 0.97     # leaky integrator decay for tracking noise floor: 0.97 = even slower adaptation (〜33 frames to rise)
 VAD_NOISE_FLOOR_INIT = 80.0      # initial noise floor estimate (RMS) — higher to avoid initial false triggers
-VAD_SPEECH_RATIO = 3.0           # frame is speech if RMS >= noise_floor * VAD_SPEECH_RATIO — higher = less sensitive
+VAD_SPEECH_RATIO = 2.2           # frame is speech if RMS >= noise_floor * VAD_SPEECH_RATIO — lower = more sensitive to quiet speech
 VAD_FLOOR_MIN = 30.0             # minimum noise floor to prevent division issues in very quiet environments
 SILENCE_DURATION_MS = 1200  # ms of silence before considering utterance complete (slightly longer to ensure true silence)
 MIN_UTTERANCE_MS = 800     # minimum utterance length to process (ms) — ignore very short noise bursts
@@ -1397,7 +1397,8 @@ async def ws_voice_realtime(websocket: WebSocket):
         
         async def _speak_task():
             nonlocal ai_speaking, barge_in_speech_frames, barge_in_silence_frames, barge_in_cooldown
-            # Reset barge-in confirmation state when AI starts a new turn
+            nonlocal speech_confirm_frames, noise_floor
+            # Reset VAD state and barge-in confirmation state when AI starts a new turn
             barge_in_speech_frames = 0
             barge_in_silence_frames = 0
             barge_in_cooldown = 0
@@ -1452,6 +1453,10 @@ async def ws_voice_realtime(websocket: WebSocket):
             finally:
                 ai_speaking = False
                 ai_speak_task = None
+                # Reset VAD state for next turn — prevents stale speech_confirm_frames
+                # and elevated noise_floor from affecting subsequent user utterances
+                speech_confirm_frames = 0
+                noise_floor = VAD_NOISE_FLOOR_INIT
         
         ai_speaking = True
         ai_speak_task = asyncio.create_task(_speak_task())
@@ -1574,6 +1579,7 @@ async def ws_voice_realtime(websocket: WebSocket):
                                     utterance_buffer = bytearray()
                                     silence_frames = 0
                                     silence_duration_ms = 0.0
+                                    speech_confirm_frames = 0
                                     continue
                             
                             # Process the utterance
@@ -1584,6 +1590,7 @@ async def ws_voice_realtime(websocket: WebSocket):
                             utterance_buffer = bytearray()
                             silence_frames = 0
                             silence_duration_ms = 0.0
+                            speech_confirm_frames = 0
                     # else: silence while not in utterance -> discard
                 
                 continue
