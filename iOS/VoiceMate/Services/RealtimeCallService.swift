@@ -90,6 +90,39 @@ class RealtimeCallService: NSObject, ObservableObject {
     private var isMicActive = false
     private var audioSampleRate: Double = 24000
     private let vadThreshold: Float = 0.02
+    
+    /// Number of consecutive frames above threshold to declare user speech
+    private let speechDebounceFrames: Int = 5
+    
+    /// Counter for consecutive frames above/below VAD threshold
+    private var speechFrameCount: Int = 0
+    private var silenceFrameCount: Int = 0
+    
+    /// Frames of silence before releasing the "user speaking" state
+    private let silenceReleaseFrames: Int = 4
+    
+    /// Running baseline RMS over the last N frames (adaptive floor)
+    private var rmsHistory: [Float] = []
+    private let rmsHistorySize: Int = 40  // ~2 seconds at 50ms per frame
+    
+    /// Number of spectral bands for voice-print comparison
+    private let spectralBandCount: Int = 8
+    
+    /// Running average of per-band spectral energy across recent valid speech frames
+    private var userSpectralProfile: [Float]?
+    private var spectralProfileFrameCount: Int = 0
+    
+    /// Frames of user speech needed before we trust spectral matching
+    private let spectralProfileWarmupFrames: Int = 20  // ~1 second of speech
+    
+    /// Maximum cosine distance to accept a frame as matching the user's spectral profile
+    private let spectralMatchThreshold: Float = 0.4
+    
+    /// Whether voice isolation / voice processing is available
+    private var supportsVoiceIsolation: Bool = false
+    
+    /// Adaptive threshold multiplier based on mic proximity heuristic
+    private var adaptiveThresholdMultiplier: Float = 1.0
     private var durationTimer: Timer?
     
     // MARK: - On-Device ASR
@@ -151,21 +184,31 @@ class RealtimeCallService: NSObject, ObservableObject {
     private func configureAudioSession() {
         let audioSession = AVAudioSession.sharedInstance()
         do {
-            // Use .default mode instead of .voiceChat to avoid iOS 16.x audio route
-            // conflicts when calling overrideOutputAudioPort on a running engine.
-            // .defaultToSpeaker ensures audio plays from the speaker, not earpiece.
-            // .mixWithOthers allows simultaneous recording and playback.
-            // .allowBluetoothHFP enables Bluetooth headset support.
+            // Use .voiceChat mode for voice processing (noise suppression, voice isolation).
+            // On iOS 16.5+, this enables the system's built-in voice isolation.
+            // Fall back to .default if .voiceChat causes issues on older iOS.
             try audioSession.setCategory(
                 .playAndRecord,
-                mode: .default,
+                mode: .voiceChat,
                 options: [.allowBluetoothHFP, .defaultToSpeaker, .mixWithOthers]
             )
             try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
             // Force audio to play through speaker (not earpiece) — done once at init.
             try audioSession.overrideOutputAudioPort(.speaker)
+
+            // Detect voice isolation support (iOS 16.5+)
+            supportsVoiceIsolation = audioSession.availableModes.contains(.voiceChat)
+            if supportsVoiceIsolation {
+                logger("Voice isolation mode is available and enabled")
+            }
         } catch {
             logger("Failed to configure audio session: \(error)")
+            // Fallback: try with .default mode
+            if let fallbackSession = try? AVAudioSession.sharedInstance() {
+                let fs = fallbackSession
+                try? fs.setCategory(.playAndRecord, mode: .default, options: [.allowBluetoothHFP, .defaultToSpeaker, .mixWithOthers])
+                try? fs.setActive(true, options: .notifyOthersOnDeactivation)
+            }
         }
     }
     
@@ -197,6 +240,14 @@ class RealtimeCallService: NSObject, ObservableObject {
         isAISpeaking = false
         isUserSpeaking = false
         isMicActive = false
+        
+        // Reset VAD state
+        speechFrameCount = 0
+        silenceFrameCount = 0
+        rmsHistory.removeAll()
+        userSpectralProfile = nil
+        spectralProfileFrameCount = 0
+        adaptiveThresholdMultiplier = 1.0
         
         // Stop capture first (stops the audio engine), then detach player node.
         stopAudioCapture()
@@ -667,14 +718,17 @@ class RealtimeCallService: NSObject, ObservableObject {
                 // Also feed the original buffer to on-device ASR
                 self.recognitionRequest?.append(buffer)
                 
-                // Quick VAD for UI state
+                // Advanced VAD for user speech detection
                 let rms = self.calculateRMS(from: buffer)
+                let spectralBands = self.computeSpectralBands(from: buffer)
+                let vadDecision = self.evaluateVAD(rms: rms, spectralBands: spectralBands)
+                
                 DispatchQueue.main.async {
-                    self.isUserSpeaking = rms > self.vadThreshold
+                    self.isUserSpeaking = vadDecision
                 }
                 
-                // Client-side barge-in detection
-                if rms > self.vadThreshold && self.isAISpeaking {
+                // Client-side barge-in detection (require sustained speech)
+                if vadDecision && self.isAISpeaking {
                     self.sendJson(["type": "barge_in"])
                 }
             }
@@ -800,6 +854,166 @@ class RealtimeCallService: NSObject, ObservableObject {
         guard count > 0 else { return 0 }
         let rms = sqrt(sumSq / Float(count))
         return rms
+    }
+    
+    /// Compute spectral energy distribution across frequency bands.
+    /// Uses simple FFT-based band energy decomposition for voice-print comparison.
+    /// Returns an array of per-band energy ratios (normalized to sum = 1.0).
+    private func computeSpectralBands(from buffer: AVAudioPCMBuffer) -> [Float] {
+        guard let channelData = buffer.floatChannelData else {
+            return [Float](repeating: 0, count: spectralBandCount)
+        }
+        let frames = Int(buffer.frameLength)
+        guard frames > 0 else {
+            return [Float](repeating: 0, count: spectralBandCount)
+        }
+        
+        let data = channelData[0]
+        let bandCount = spectralBandCount
+        
+        // Compute magnitude FFT. Use the nearest power of 2.
+        let fftSize = 1 << (Int(log2(Float(frames))) + 1)
+        guard fftSize >= 4 else {
+            return [Float](repeating: 0, count: bandCount)
+        }
+        
+        // Prepare split complex buffer
+        let realPart = UnsafeMutablePointer<Float>.allocate(capacity: fftSize)
+        let imagPart = UnsafeMutablePointer<Float>.allocate(capacity: fftSize)
+        defer {
+            realPart.deallocate()
+            imagPart.deallocate()
+        }
+        
+        // Copy with Hanning window
+        for i in 0..<fftSize {
+            if i < frames {
+                let hann = 0.5 * (1 - cos(2 * Float.pi * Float(i) / Float(fftSize - 1)))
+                realPart[i] = data[i] * hann
+            } else {
+                realPart[i] = 0
+            }
+            imagPart[i] = 0
+        }
+        
+        // FFT
+        let log2n = UInt(log2(Float(fftSize)))
+        guard let fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else {
+            return [Float](repeating: 0, count: bandCount)
+        }
+        defer { vDSP_destroy_fftsetup(fftSetup) }
+        
+        var splitComplex = DSPSplitComplex(realp: realPart, imagp: imagPart)
+        vDSP_fft_zip(fftSetup, &splitComplex, 1, log2n, FFTDirection(kFFTDirection_Forward))
+        
+        // Compute magnitude spectrum (only first half)
+        let halfSize = fftSize / 2
+        var magnitudes = [Float](repeating: 0, count: halfSize)
+        vDSP_zvmags(&splitComplex, 1, &magnitudes, 1, vDSP_Length(halfSize))
+        // Convert to magnitude (sqrt)
+        var sqrtMagnitudes = [Float](repeating: 0, count: halfSize)
+        vvsqrtf(&sqrtMagnitudes, magnitudes, [Int32(halfSize)])
+        
+        // Divide spectrum into bands (wider bands at higher frequencies, like mel-scale)
+        let binsPerBand = halfSize / bandCount
+        var bands = [Float](repeating: 0, count: bandCount)
+        var totalEnergy: Float = 0
+        
+        for b in 0..<bandCount {
+            let startBin = b * binsPerBand
+            let endBin = (b == bandCount - 1) ? halfSize : (b + 1) * binsPerBand
+            var bandSum: Float = 0
+            for k in startBin..<min(endBin, halfSize) {
+                bandSum += sqrtMagnitudes[k]
+            }
+            bands[b] = bandSum
+            totalEnergy += bandSum
+        }
+        
+        // Normalize
+        if totalEnergy > 0 {
+            for b in 0..<bandCount {
+                bands[b] /= totalEnergy
+            }
+        }
+        
+        return bands
+    }
+    
+    /// Evaluate VAD using sustained speech + spectral matching + adaptive threshold.
+    /// Returns true only when confident the user is speaking.
+    private func evaluateVAD(rms: Float, spectralBands: [Float]) -> Bool {
+        // 1. Update RMS history for adaptive baseline
+        rmsHistory.append(rms)
+        if rmsHistory.count > rmsHistorySize {
+            rmsHistory.removeFirst()
+        }
+        
+        // 2. Compute adaptive threshold based on recent noise floor
+        let sortedHistory = rmsHistory.sorted()
+        let medianIdx = sortedHistory.count / 2
+        let noiseFloor = sortedHistory[medianIdx]
+        let adaptiveFloor = noiseFloor * 2.0
+        
+        // Calculate adaptive multiplier: if recent RMS is low (quiet environment),
+        // use a generous threshold. If recent RMS is high (phone close to mouth),
+        // use a higher threshold that requires louder speech.
+        let recentMax = sortedHistory.last ?? rms
+        let dynamicRange = max(recentMax - noiseFloor, 0.001)
+        // When the mic is held close, the closest peaks are ~10x the noise floor.
+        // Use a multiplier of 1.0 for quiet, up to ~3.0 for close-proximity.
+        adaptiveThresholdMultiplier = min(3.0, max(1.0, dynamicRange / 0.05))
+        let effectiveThreshold = max(adaptiveFloor, vadThreshold * adaptiveThresholdMultiplier)
+        
+        // 3. Check if current frame exceeds threshold (basic energy test)
+        let aboveEnergyThreshold = rms > effectiveThreshold
+        
+        // 4. Spectral matching against user voice profile (if warm)
+        var spectralMatch = true
+        if let profile = userSpectralProfile, spectralProfileFrameCount >= spectralProfileWarmupFrames {
+            // Compute cosine similarity between current spectral bands and user profile
+            var dotProduct: Float = 0
+            var magCurrent: Float = 0
+            var magProfile: Float = 0
+            for i in 0..<min(spectralBands.count, profile.count) {
+                dotProduct += spectralBands[i] * profile[i]
+                magCurrent += spectralBands[i] * spectralBands[i]
+                magProfile += profile[i] * profile[i]
+            }
+            let similarity = dotProduct / (sqrt(magCurrent) * sqrt(magProfile) + 0.001)
+            // Cosine distance: lower = more similar. Accept if distance < threshold.
+            spectralMatch = (1.0 - similarity) < spectralMatchThreshold
+        }
+        
+        // 5. Update user spectral profile on high-confidence speech frames
+        //    (frames that are loud and sustained — likely user)
+        if aboveEnergyThreshold && spectralMatch {
+            // Update running average of spectral profile
+            if var profile = userSpectralProfile {
+                let alpha: Float = 0.1  // Slow adapt
+                for i in 0..<min(spectralBands.count, profile.count) {
+                    profile[i] = profile[i] * (1 - alpha) + spectralBands[i] * alpha
+                }
+                userSpectralProfile = profile
+            } else {
+                userSpectralProfile = spectralBands
+            }
+            spectralProfileFrameCount += 1
+        }
+        
+        // 6. Sustained speech detection (debounce)
+        if aboveEnergyThreshold && spectralMatch {
+            speechFrameCount += 1
+            silenceFrameCount = 0
+        } else {
+            silenceFrameCount += 1
+            if silenceFrameCount >= silenceReleaseFrames {
+                speechFrameCount = 0
+            }
+        }
+        
+        // 7. Final decision: require sustained speech across multiple frames
+        return speechFrameCount >= speechDebounceFrames
     }
     
     // MARK: - Audio Playback (Streaming)
