@@ -40,6 +40,7 @@
 			<array>
 				<string>EHJRGC4A7SQGP46QOBKMNNO8</string>
 				<string>UPA3LGI3P6D6FZW3LZ2HOZUM</string>
+				<string>F47B4F904D3D44AC8E6FCA5F</string>
 				<string>ZX37FKKHXPUFX89V8GFS47TQ</string>
 			</array>
 			<key>buildRules</key>
@@ -209,6 +210,23 @@
 			<key>runOnlyForDeploymentPostprocessing</key>
 			<integer>0</integer>
 		</dict>
+		<key>F47B4F904D3D44AC8E6FCA5F</key>
+		<dict>
+			<key>buildActionMask</key>
+			<integer>2147483647</integer>
+			<key>dstPath</key>
+			<string></string>
+			<key>dstSubfolderSpec</key>
+			<integer>10</integer>
+			<key>files</key>
+			<array/>
+			<key>isa</key>
+			<string>PBXCopyFilesBuildPhase</string>
+			<key>name</key>
+			<string>Embed Frameworks</string>
+			<key>runOnlyForDeploymentPostprocessing</key>
+			<integer>0</integer>
+		</dict>
 		<key>FIFJ4FJAFPACWG12YUHDD1X7</key>
 		<dict>
 			<key>fileRef</key>
@@ -292,6 +310,10 @@
 				<string>VoiceMate/Resources/Info.plist</string>
 				<key>IPHONEOS_DEPLOYMENT_TARGET</key>
 				<string>16.0</string>
+				<key>LD_RUNPATH_SEARCH_PATHS</key>
+				<array>
+					<string>@executable_path/Frameworks</string>
+				</array>
 				<key>PRODUCT_BUNDLE_IDENTIFIER</key>
 				<string>com.voicemate.app</string>
 				<key>PRODUCT_NAME</key>
@@ -426,6 +448,10 @@
 				<string>VoiceMate/Resources/Info.plist</string>
 				<key>IPHONEOS_DEPLOYMENT_TARGET</key>
 				<string>16.0</string>
+				<key>LD_RUNPATH_SEARCH_PATHS</key>
+				<array>
+					<string>@executable_path/Frameworks</string>
+				</array>
 				<key>PRODUCT_BUNDLE_IDENTIFIER</key>
 				<string>com.voicemate.app</string>
 				<key>PRODUCT_NAME</key>
