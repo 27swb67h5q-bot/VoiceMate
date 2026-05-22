@@ -1167,12 +1167,12 @@ _load_clone_db()
 # WebRTC VAD configuration
 import webrtcvad
 VAD_FRAME_MS = 30           # webrtcvad requires 10/20/30ms frames; 30ms = 480 bytes at 16kHz 16-bit
-VAD_NOISE_FLOOR_DECAY = 0.95     # leaky integrator decay for tracking noise floor: 0.95 = slow adaptation (〜20 frames to rise)
-VAD_NOISE_FLOOR_INIT = 50.0      # initial noise floor estimate (RMS)
-VAD_SPEECH_RATIO = 2.5           # frame is speech if RMS >= noise_floor * VAD_SPEECH_RATIO (adaptive threshold)
-VAD_FLOOR_MIN = 20.0             # minimum noise floor to prevent division issues in very quiet environments
-SILENCE_DURATION_MS = 1000  # ms of silence before considering utterance complete (increased to 1s to avoid cutting off user thinking pauses)
-MIN_UTTERANCE_MS = 500     # minimum utterance length to process (ms)
+VAD_NOISE_FLOOR_DECAY = 0.97     # leaky integrator decay for tracking noise floor: 0.97 = even slower adaptation (〜33 frames to rise)
+VAD_NOISE_FLOOR_INIT = 80.0      # initial noise floor estimate (RMS) — higher to avoid initial false triggers
+VAD_SPEECH_RATIO = 3.0           # frame is speech if RMS >= noise_floor * VAD_SPEECH_RATIO — higher = less sensitive
+VAD_FLOOR_MIN = 30.0             # minimum noise floor to prevent division issues in very quiet environments
+SILENCE_DURATION_MS = 1200  # ms of silence before considering utterance complete (slightly longer to ensure true silence)
+MIN_UTTERANCE_MS = 800     # minimum utterance length to process (ms) — ignore very short noise bursts
 SAMPLE_RATE = 16000        # iOS sends 16kHz PCM16 mono
 BYTES_PER_SAMPLE = 2
 
@@ -1281,7 +1281,7 @@ async def ws_voice_realtime(websocket: WebSocket):
     vad_buffer = bytearray()        # PCM buffer to accumulate VAD frame (480 bytes for 30ms @ 16kHz)
     silence_frames = 0              # consecutive silent frames
     speech_confirm_frames = 0   # consecutive speech frames needed to start utterance (require >= 4)
-    VAD_CONFIRM_FRAMES = 4          # require 4 consecutive speech frames (120ms) before utterance starts
+    VAD_CONFIRM_FRAMES = 6          # require 6 consecutive speech frames (180ms) before utterance starts — more robust against noise bursts
     silence_duration_ms = 0.0       # accumulated silence duration (ms)
     utterance_active = False        # currently in an utterance
     utterance_buffer = bytearray()  # PCM data for current utterance
@@ -1349,6 +1349,10 @@ async def ws_voice_realtime(websocket: WebSocket):
         # Skip filler/thinking noises (e.g., "嗯", "um", "啊") - do not call LLM
         if _is_filler_text(ai_text):
             logger.info(f"Ignoring filler text: {ai_text!r} [{conv_id}]")
+            try:
+                await websocket.send_json({"type": "turn_skipped", "conversation_id": conv_id, "reason": "filler"})
+            except Exception:
+                pass
             return
 
         # Guard: if already speaking, cancel previous task first
@@ -1382,7 +1386,7 @@ async def ws_voice_realtime(websocket: WebSocket):
                 logger.info(f"DeepSeek reply complete ({len(full_reply)} chars) [{conv_id}]")
                 
                 if not full_reply:
-                    full_reply = "嗯，我听到了呢～"
+                    full_reply = "我听到了呢～"
                 
                 clean_reply = strip_markdown(full_reply)
                 clean_reply = naturalize_text(clean_reply)
@@ -1568,6 +1572,15 @@ async def ws_voice_realtime(websocket: WebSocket):
                 text = data.get("text", "").strip()
                 if not text:
                     logger.warning(f"Empty text received in text command [{conv_id}]")
+                    continue
+                
+                # Skip filler/thinking noises at the text handler level too
+                if _is_filler_text(text):
+                    logger.info(f"Ignoring filler text at text handler: {text!r} [{conv_id}]")
+                    try:
+                        await websocket.send_json({"type": "turn_skipped", "conversation_id": conv_id, "reason": "filler"})
+                    except Exception:
+                        pass
                     continue
                 
                 if "voice" in data:

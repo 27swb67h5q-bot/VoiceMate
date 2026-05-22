@@ -70,6 +70,7 @@ class RealtimeCallService: NSObject, ObservableObject {
     private var recordingFormat: AVAudioFormat?
     
     // MARK: - Audio Playback (Shared engine — playerNode attached to audioEngine)
+    
     // MARK: - Audio Playback (Streaming)
     private var playbackPlayerNode: AVAudioPlayerNode?
     /// Playback audio buffer queue — buffers arriving chunks while player is busy
@@ -513,6 +514,9 @@ class RealtimeCallService: NSObject, ObservableObject {
                 self.errorMessage = "连接超时"
                 self.endCall()
             
+            case "turn_skipped":
+                self.handleTurnSkipped()
+            
             case "error":
                 if let msg = json["message"] as? String {
                     self.errorMessage = msg
@@ -538,8 +542,18 @@ class RealtimeCallService: NSObject, ObservableObject {
         let accumulatedText = currentUtteranceText.trimmingCharacters(in: .whitespacesAndNewlines)
         
         if !localText.isEmpty {
+            if isFillerText(localText) {
+                logger("Ignoring filler text: \(localText)")
+                isProcessingUtterance = false
+                return
+            }
             sendUtteranceText(localText)
         } else if !accumulatedText.isEmpty {
+            if isFillerText(accumulatedText) {
+                logger("Ignoring filler text: \(accumulatedText)")
+                isProcessingUtterance = false
+                return
+            }
             sendUtteranceText(accumulatedText)
         } else if hasASRStarted {
             // ASR has started but may not have produced results yet — brief wait
@@ -548,16 +562,21 @@ class RealtimeCallService: NSObject, ObservableObject {
                 guard let self = self, self.isProcessingUtterance else { return }
                 let text = self.pendingUserText.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !text.isEmpty {
+                    if self.isFillerText(text) {
+                        self.logger("Ignoring filler text after wait: \(text)")
+                        self.isProcessingUtterance = false
+                        return
+                    }
                     self.sendUtteranceText(text)
                 } else {
-                    self.logger("Sending acknowledgment fallback")
-                    self.sendUtteranceText("\u{55ef}")
+                    self.logger("No ASR text after wait, silently skipping (background noise)")
+                    self.isProcessingUtterance = false
                 }
             }
         } else {
-            // ASR hasn't started at all — send acknowledgment to keep conversation flowing
-            logger("ASR not started yet, sending acknowledgment")
-            sendUtteranceText("\u{55ef}")
+            // ASR hasn't started at all — this means VAD triggered on background noise
+            logger("ASR not started yet, silently skipping (no real speech)")
+            isProcessingUtterance = false
         }
     }
     
@@ -601,6 +620,15 @@ class RealtimeCallService: NSObject, ObservableObject {
         pendingUserText = ""
         lastSentUserText = ""
         logger("Turn completed, ready for next utterance")
+    }
+    
+    private func handleTurnSkipped() {
+        logger("Turn skipped by server (noise/filler detected)")
+        isProcessingUtterance = false
+        pendingUserText = ""
+        currentUtteranceText = ""
+        hasASRStarted = false
+        lastSentUserText = ""
     }
     
     private func onAudioEnd() {
@@ -1065,6 +1093,24 @@ class RealtimeCallService: NSObject, ObservableObject {
         return speechFrameCount >= speechDebounceFrames
     }
     
+    
+    // MARK: - Filler Text Detection
+    
+    /// Set of filler/noise words that should be silently dropped
+    private static let fillerWords: Set<String> = [
+        "\u{55ef}", "\u{5560}", "\u{554a}", "\u{54e6}", "\u{5614}", "\u{5416}", "\u{54c8}", "\u{563f}",
+        "um", "uh", "ah", "er", "hmm",
+    ]
+    
+    /// Check if text is just filler/thinking noise (e.g., "嗯", "um", "啊")
+    private func isFillerText(_ text: String) -> Bool {
+        let stripped = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "。.!！?？,，…"))
+            .lowercased()
+        return Self.fillerWords.contains(stripped)
+    }
+    
+
     // MARK: - Audio Playback (Streaming)
     
     private func setupAudioPlayback() {
