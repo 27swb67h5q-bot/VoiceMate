@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 #!/usr/bin/env python3
 """
 VoiceMate Backend - FastAPI server for AI voice companion
@@ -1704,29 +1704,33 @@ ROOM_NAME = "voicemate"
 async def create_livekit_token():
     """
     Generate a LiveKit access token for joining the VoiceMate room.
-
-    No authentication required (testing phase).
-    Each request creates a unique identity to join the shared room.
     """
-    identity = f"voicemate-{uuid.uuid4().hex[:12]}"
+    try:
+        logger.info(f"Generating LiveKit token: key={LIVEKIT_API_KEY[:10]}... secret={LIVEKIT_API_SECRET[:10]}...")
+        identity = f"voicemate-{uuid.uuid4().hex[:12]}"
 
-    token = AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
-    token.identity = identity
-    token.ttl = datetime.timedelta(hours=2)
-    token.with_grants(VideoGrants(
-        room_join=True,
-        room=ROOM_NAME,
-        can_publish=True,
-        can_subscribe=True,
-        can_publish_data=True,
-    ))
-    jwt = token.to_jwt()
+        token = AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
+        token.identity = identity
+        token.ttl = timedelta(hours=2)
+        token.with_grants(VideoGrants(
+            room_join=True,
+            room=ROOM_NAME,
+            can_publish=True,
+            can_subscribe=True,
+            can_publish_data=True,
+        ))
+        jwt = token.to_jwt()
+        logger.info(f"LiveKit token generated successfully")
 
-    return {
-        "token": jwt,
-        "room": ROOM_NAME,
-        "url": f"ws://{LIVEKIT_HOST}:{LIVEKIT_PORT}",
-    }
+        return {
+            "token": jwt,
+            "room": ROOM_NAME,
+            "url": f"ws://{LIVEKIT_HOST}:{LIVEKIT_PORT}",
+        }
+    except Exception as e:
+        logger.exception(f"LiveKit token generation failed: {e}")
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ── Proactive Push Messages ──────────────────────────────────────────────────
 
