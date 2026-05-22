@@ -83,7 +83,7 @@ class RealtimeCallService: NSObject, ObservableObject {
     private var durationTimer: Timer?
     
     // MARK: - On-Device Speech Recognition (SFSpeechRecognizer)
-    private let speechRecognizer: SFSpeechRecognizer?
+    private var speechRecognizer: SFSpeechRecognizer?
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
     

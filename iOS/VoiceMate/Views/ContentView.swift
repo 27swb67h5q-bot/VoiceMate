@@ -80,8 +80,8 @@ struct ContentView: View {
                     voice: voiceService.selectedVoice,
                     persona: voiceService.selectedPersona,
                     speed: voiceService.speechSpeed,
-                    onTurnCompleted: { isUser, text in
-                        appendMessage(isUser: isUser, text: text)
+                            onTurnCompleted: { [self] isUser, text in
+                                self.appendMessage(isUser: isUser, text: text)
                     }
                 )
             }
@@ -587,6 +587,19 @@ struct ContentView: View {
             }
         }
     }
+
+    /// Append a single ChatMessage from the real-time call and persist
+    private func appendMessage(isUser: Bool, text: String) {
+        let msg = ChatMessage(
+            id: UUID(),
+            isUser: isUser,
+            text: text,
+            audioURL: nil,
+            timestamp: Date()
+        )
+        messages.append(msg)
+        saveMessages()
+    }
 }
 
 // MARK: - Message Bubble
@@ -735,21 +748,7 @@ struct MessageBubble: View {
                 isPlaying = false
             }
         }
-    }
-    
-    /// Append real-time call transcript entries as ChatMessage objects to the main chat
-    /// Append a single ChatMessage from the real-time call and persist
-    private func appendMessage(isUser: Bool, text: String) {
-        let msg = ChatMessage(
-            id: UUID(),
-            isUser: isUser,
-            text: text,
-            audioURL: nil,
-            timestamp: Date()
-        )
-        messages.append(msg)
-        saveMessages()
-    }
+}
 }
 
 
