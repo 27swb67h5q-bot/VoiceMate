@@ -225,7 +225,8 @@
 				SWIFT_VERSION = 5.9;
 				TARGETED_DEVICE_FAMILY = 1;
 				DEVELOPMENT_TEAM = "";
-			};
+							ALWAYS_SEARCH_USER_PATHS = NO;
+};
 			name = Release;
 		};
 		ZG59303MSX5S9VY2D4TPGS87 = {

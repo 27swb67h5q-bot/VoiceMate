@@ -8,7 +8,7 @@ options:
 packages:
   LiveKit:
     url: https://github.com/livekit/client-sdk-swift.git
-    from: 2.0.0
+    from: 1.0.0
 
 settings:
   base:
