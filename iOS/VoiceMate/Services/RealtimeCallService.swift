@@ -6,7 +6,7 @@ import Speech
 /// Manages a true full-duplex real-time voice conversation with the VoiceMate backend.
 ///
 /// Architecture (Full-Duplex):
-/// ┌──────────────────────────────────────────────────────────────┐
+/// ┌───────────────────────────────────────────────────���──────────┐
 /// │  iOS                                                        │
 /// │  ┌──────────┐    PCM16 16kHz chunks    ┌───────────────┐   │
 /// │  │  Mic     │ ──────────────────────────▶  WebSocket    │   │
@@ -83,24 +83,28 @@ class RealtimeCallService: NSObject, ObservableObject {
     private var playbackFormat: AVAudioFormat?
     /// Dedicated mixer node to avoid reconnecting to mainMixer on a running engine
     private var playbackMixerNode: AVAudioMixerNode?
-    /// Callback invoked per-turn when a user utterance or AI reply completes
+    /// Callback invoked per-turn when a complete user or AI utterance is done
     var onTurnCompleted: ((_ isUser: Bool, _ text: String) -> Void)?
-
-    private var audioSampleRate: Double = 24000
     
-    // MARK: - VAD (Simple energy-based for client-side barge-in)
-    private let vadThreshold: Float = 0.015  // normalized RMS threshold
+    // MARK: - Internal State
     private var isMicActive = false
-    
-    // Call duration timer
+    private var audioSampleRate: Double = 24000
+    private let vadThreshold: Float = 0.02
     private var durationTimer: Timer?
-    private var durationStartTime: Date?
     
-    // MARK: - On-Device Speech Recognition (SFSpeechRecognizer)
-    private var speechRecognizer: SFSpeechRecognizer?
+    // MARK: - On-Device ASR
+    private let speechRecognizer: SFSpeechRecognizer?
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
     
+    // MARK: - Playback State Lock
+    /// Protects playbackPlayerNode, playbackStateValid, playbackFormat from concurrent access
+    /// across URLSession delegate queue (handleAudioData) and main thread (start/stop).
+    private let playbackStateLock = NSLock()
+    /// When false, handleAudioData should not schedule buffers on the player node.
+    /// Set to true only when startPlaybackNode() has called play().
+    private var playbackStateValid = false
+
     // MARK: - Init
     
     init(serverHost: String, serverPort: String, voice: String, persona: String, speed: Double) {
@@ -111,30 +115,57 @@ class RealtimeCallService: NSObject, ObservableObject {
         self.speed = speed
         
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 300
+        config.waitsForConnectivity = true
         config.timeoutIntervalForResource = 600
         self.urlSession = URLSession(configuration: config)
         
+        self.speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN"))
+        
         super.init()
+        
         requestPermissions()
-        setupSpeechRecognizer()
+        
+        // Configure audio session once at init time — do not reconfigure during call
+        configureAudioSession()
     }
     
     deinit {
-        endCall()
-    }
-    
-    private func setupSpeechRecognizer() {
-        self.speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN"))
-        // Pre-create the recognition request so startAudioCapture() can feed it buffers
-        self.recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
-        self.recognitionRequest?.shouldReportPartialResults = true
+        if audioEngine.isRunning {
+            audioEngine.stop()
+        }
     }
     
     private func requestPermissions() {
         AVAudioSession.sharedInstance().requestRecordPermission { _ in }
         SFSpeechRecognizer.requestAuthorization { status in
             print("[RealtimeCall] Speech recognition auth: \(status.rawValue)")
+        }
+    }
+    
+    // MARK: - Audio Session Configuration
+    
+    /// Configure audio session once. Called at init time.
+    /// On iOS 16.x, reconfiguring the audio session (especially .voiceChat mode or
+    /// overrideOutputAudioPort) while the engine is running can cause crashes.
+    /// We set everything up here and never change it during a call.
+    private func configureAudioSession() {
+        let audioSession = AVAudioSession.sharedInstance()
+        do {
+            // Use .default mode instead of .voiceChat to avoid iOS 16.x audio route
+            // conflicts when calling overrideOutputAudioPort on a running engine.
+            // .defaultToSpeaker ensures audio plays from the speaker, not earpiece.
+            // .mixWithOthers allows simultaneous recording and playback.
+            // .allowBluetoothHFP enables Bluetooth headset support.
+            try audioSession.setCategory(
+                .playAndRecord,
+                mode: .default,
+                options: [.allowBluetoothHFP, .defaultToSpeaker, .mixWithOthers]
+            )
+            try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
+            // Force audio to play through speaker (not earpiece) — done once at init.
+            try audioSession.overrideOutputAudioPort(.speaker)
+        } catch {
+            logger("Failed to configure audio session: \(error)")
         }
     }
     
@@ -171,7 +202,12 @@ class RealtimeCallService: NSObject, ObservableObject {
         stopAudioCapture()
         stopASR()
         
-        // Detach the player node and mixer so startAudioCapture can re-attach fresh ones.
+        // Take the lock before detaching/destroying playback objects.
+        // handleAudioData runs on scheduleQueue and checks under the same lock.
+        playbackStateLock.lock()
+        playbackStateValid = false
+        playbackFormat = nil
+        
         if let node = playbackPlayerNode {
             audioEngine.detach(node)
         }
@@ -181,6 +217,12 @@ class RealtimeCallService: NSObject, ObservableObject {
         playbackPlayerNode = nil
         playbackMixerNode = nil
         playbackEverStarted = false
+        playbackStateLock.unlock()
+        
+        // Clear any pending buffers
+        scheduleQueue.sync {
+            pendingBuffers.removeAll()
+        }
         
         disconnectWebSocket()
         
@@ -191,7 +233,8 @@ class RealtimeCallService: NSObject, ObservableObject {
         reconnectTimer?.invalidate()
         reconnectTimer = nil
         
-        try? AVAudioSession.sharedInstance().setActive(false)
+        // Do NOT deactivate the audio session — it was configured at init time.
+        // Deactivating can cause issues if the user starts another call quickly.
         
         logger("Call ended. Transcript count: \(transcript.count)")
         // transcript is kept so the view can read it after endCall
@@ -353,6 +396,21 @@ class RealtimeCallService: NSObject, ObservableObject {
                 if let sr = json["sample_rate"] as? Double {
                     self.audioSampleRate = sr
                 }
+                // Clear pending buffers and mark playback invalid BEFORE reconfiguring.
+                // This must complete before handleAudioData (on scheduleQueue) can
+                // check playbackStateValid, so that no stale buffers are scheduled.
+                self.scheduleQueue.sync {
+                    self.pendingBuffers.removeAll()
+                    self.playbackStateLock.lock()
+                    self.playbackStateValid = false
+                    self.playbackStateLock.unlock()
+                }
+                // Stop any previous playback BEFORE reconfiguring the format.
+                // play() was called at least once from the previous audio_start,
+                // so stop() is safe (playbackEverStarted is true).
+                if self.playbackEverStarted, let node = self.playbackPlayerNode {
+                    node.stop()
+                }
                 self.setupAudioPlayback()
                 self.startPlaybackNode()
             
@@ -364,7 +422,7 @@ class RealtimeCallService: NSObject, ObservableObject {
             
             case "interrupted":
                 self.isAISpeaking = false
-                self.stopAudioPlayback()
+                self.stopPlaybackInternal()
             
             case "timeout":
                 self.errorMessage = "连接超时"
@@ -464,7 +522,6 @@ class RealtimeCallService: NSObject, ObservableObject {
         logger("Audio stream ended, waiting for turn_done")
     }
     
-
     // MARK: - On-Device Speech Recognition
 
     private func startASR() {
@@ -514,10 +571,13 @@ class RealtimeCallService: NSObject, ObservableObject {
 
     private func handleAudioData(_ data: Data) {
         // PCM16 audio chunks from server — play via the single engine
-        guard let format = playbackFormat else {
-            return
-        }
+        // Check format under the lock to avoid racing with stopPlayback/endCall
+        playbackStateLock.lock()
+        let format = playbackFormat
+        let valid = playbackStateValid
+        playbackStateLock.unlock()
         
+        guard let format = format else { return }
         guard audioEngine.isRunning else { return }
         
         let frameLength = data.count / 2  // 16-bit samples
@@ -540,16 +600,29 @@ class RealtimeCallService: NSObject, ObservableObject {
             vDSP_vsdiv(floatPtr, 1, &scale, floatPtr, 1, vDSP_Length(frameLength))
         }
         
-        // Schedule directly on the player node via serial queue.
-        // scheduleBuffer is thread-safe, but serializing through scheduleQueue
-        // ensures ordering and avoids races when stop/reset happen concurrently.
+        // Schedule via serial queue. Inside the block we re-check playback state
+        // under the lock — this ensures we never schedule on a stopped/detached node
+        // on iOS 16.x (which causes EXC_BAD_ACCESS).
         scheduleQueue.async { [weak self] in
-            guard let self = self, let node = self.playbackPlayerNode else { return }
-            if node.isPlaying {
-                node.scheduleBuffer(pcmBuffer)
-            } else {
-                // Node not yet playing — enqueue; it will be flushed after startPlaybackNode()
+            guard let self = self else { return }
+            guard self.audioEngine.isRunning else { return }
+            
+            self.playbackStateLock.lock()
+            let stillValid = self.playbackStateValid
+            let node = self.playbackPlayerNode
+            self.playbackStateLock.unlock()
+            
+            guard let playerNode = node else { return }
+            
+            if stillValid && playerNode.isPlaying {
+                playerNode.scheduleBuffer(pcmBuffer)
+            } else if stillValid {
+                // Node is valid but not yet playing (transient between audio_start and play())
                 self.pendingBuffers.append((pcmBuffer, false))
+            } else {
+                // Playback state invalid — dropping buffer to avoid scheduling
+                // on a stopped node (crashes iOS 16.x).
+                logger("Dropping audio buffer: playback state invalid")
             }
         }
     }
@@ -562,24 +635,12 @@ class RealtimeCallService: NSObject, ObservableObject {
         return true
     }
     
-
     // MARK: - Audio Capture (Always-on Mic)
     
     private func startAudioCapture() {
-        let audioSession = AVAudioSession.sharedInstance()
-        do {
-            // PlayAndRecord is required for full-duplex
-            // .defaultToSpeaker ensures audio plays from speaker, not earpiece
-            // .mixWithOthers allows both mic and speaker to work simultaneously
-            try audioSession.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP, .defaultToSpeaker, .mixWithOthers])
-            try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
-            // Force audio to play through speaker (not earpiece)
-            try audioSession.overrideOutputAudioPort(.speaker)
-        } catch {
-            logger("Failed to set audio session: \(error)")
-            errorMessage = "麦克风初始化失败"
-            return
-        }
+        // Audio session is already configured in init(). Do NOT reconfigure it here
+        // because reconfiguring the session with overrideOutputAudioPort on a
+        // running or newly-started engine can crash on iOS 16.5.
         
         let inputNode = audioEngine.inputNode
         let nodeFormat = inputNode.outputFormat(forBus: bus)
@@ -749,45 +810,53 @@ class RealtimeCallService: NSObject, ObservableObject {
             return
         }
         
-        // Create playback format matching the server's TTS sample rate.
-        // The playerNode is already permanently connected to playbackMixerNode with
-        // nil format (automatic format conversion), so we do NOT reconnect the audio
-        // graph on a running engine — that can crash.
-        // We only need the format object for constructing PCM buffers from incoming data.
-        let format = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: audioSampleRate,
-            channels: 1,
-            interleaved: false
-        )!
-        playbackFormat = format
+        // Only update format if sample rate changed; avoids unnecessary reallocation
+        // and keeps the format valid reference for handleAudioData.
+        if playbackFormat?.sampleRate != audioSampleRate {
+            // The playerNode is already permanently connected to playbackMixerNode with
+            // nil format (automatic format conversion), so we do NOT reconnect the audio
+            // graph on a running engine — that can crash.
+            // We only need the format object for constructing PCM buffers from incoming data.
+            let format = AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: audioSampleRate,
+                channels: 1,
+                interleaved: false
+            )!
+            playbackFormat = format
+        }
         
         // NOTE: Do NOT call playerNode.stop() here — on iOS 16.x, calling stop()
         // on a player node that has never been started with play() causes EXC_BAD_ACCESS.
-        // The player will be started/restarted by startPlaybackNode() which is called
-        // immediately after setupAudioPlayback() from the audio_start handler.
+        // The player's previous playback was already stopped in the audio_start handler
         
         logger("Audio playback format set (sample rate: \(Int(audioSampleRate)) Hz)")
     }
     
-    
     /// Starts (or restarts) the player node for streaming playback.
-    /// Separated from setupAudioPlayback() to avoid calling stop() on a node
-    /// that has never played — which crashes on iOS 16.x.
+    ///
+    /// On iOS 16.x, calling stop() on an AVAudioPlayerNode that has never received
+    /// play() causes EXC_BAD_ACCESS. We avoid this by tracking playbackEverStarted.
+    ///
+    /// For the 2nd+ TTS turn, the node was already stopped in the audio_start handler
+    /// (before setupAudioPlayback), so here we only call play() — no more stop().
+    /// This avoids the iOS 16.x crash that can occur when stop()→play() on a running
+    /// engine.
     private func startPlaybackNode() {
         guard let playerNode = playbackPlayerNode else { return }
         
-        if playbackEverStarted {
-            // Stop and restart to flush any previous TTS buffers.
-            // Safe because the node was previously started with play().
-            playerNode.stop()
-        }
         playerNode.play()
         playbackEverStarted = true
         
-        // Flush any buffers that arrived while the node was stopped/not-yet-playing
+        // Mark playback state valid, then flush pending buffers.
+        // Must happen inside scheduleQueue.sync to avoid races with handleAudioData
+        // which also accesses pendingBuffers and checks playbackStateValid under the lock.
         scheduleQueue.sync { [weak self] in
             guard let self = self else { return }
+            self.playbackStateLock.lock()
+            self.playbackStateValid = true
+            self.playbackStateLock.unlock()
+            
             let pending = self.pendingBuffers
             self.pendingBuffers.removeAll()
             for (buffer, _) in pending {
@@ -795,34 +864,46 @@ class RealtimeCallService: NSObject, ObservableObject {
             }
         }
         
-        // Ensure audio is routed to speaker (not earpiece)
-        do {
-            try AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker)
-        } catch {
-            logger("Failed to override audio port: \(error)")
-        }
-        
         logger("Audio playback started (sample rate: \(Int(audioSampleRate)) Hz)")
     }
     
-    
-    private func stopAudioPlayback() {
+    /// Internal stop: used for transient interruptions (barge-in).
+    /// Stops the node and marks state invalid, but keeps playbackFormat alive
+    /// so handleAudioData can still check state and drop rather than crash.
+    private func stopPlaybackInternal() {
         guard let playerNode = playbackPlayerNode else { return }
         
-        // Stop scheduling new buffers. scheduleQueue serialization ensures we don't
-        // have concurrent scheduleBuffer calls racing with stop().
+        // Serialize with handleAudioData
         scheduleQueue.sync {
             pendingBuffers.removeAll()
         }
         
-        // Stop the player node. Safe on a running engine.
-        playerNode.stop()
+        playbackStateLock.lock()
+        playbackStateValid = false
+        playbackStateLock.unlock()
         
-        // Reset internal state
-        playbackFormat = nil
-        logger("Audio playback stopped")
+        playerNode.stop()
+        logger("Audio playback stopped (interrupted)")
     }
     
+    /// Full cleanup: stops node, clears format, mark state invalid.
+    /// Called only from endCall().
+    private func stopAudioPlayback() {
+        guard let playerNode = playbackPlayerNode else { return }
+        
+        // Serialize with handleAudioData
+        scheduleQueue.sync {
+            pendingBuffers.removeAll()
+        }
+        
+        playbackStateLock.lock()
+        playbackStateValid = false
+        playbackFormat = nil
+        playbackStateLock.unlock()
+        
+        playerNode.stop()
+        logger("Audio playback stopped (full cleanup)")
+    }
     
     // MARK: - Helpers
     
