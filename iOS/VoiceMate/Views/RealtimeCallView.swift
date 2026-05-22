@@ -35,6 +35,7 @@ struct RealtimeCallView: View {
         self.persona = persona
         self.speed = speed
         self.onTranscript = onTranscript
+        self.onTurnCompleted = onTurnCompleted
         
         let service = RealtimeCallService(
             serverHost: serverHost,
