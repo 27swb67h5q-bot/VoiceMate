@@ -1,0 +1,19 @@
+workflows:
+  default:
+    name: VoiceMate
+    environment:
+      xcode: 15.4
+    scripts:
+      - name: Build
+        script: |
+          cd iOS
+          xcodebuild -project VoiceMate.xcodeproj \
+            -scheme VoiceMate \
+            -sdk iphoneos \
+            -configuration Release \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+    artifacts:
+      - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.app
