@@ -43,7 +43,7 @@ class VoiceMateService: ObservableObject {
         self.session = URLSession(configuration: config)
         
         // Load saved config or use defaults (persists across reboots)
-        self.serverHost = UserDefaults.standard.string(forKey: "server_host") ?? "192.168.10.227"
+        self.serverHost = UserDefaults.standard.string(forKey: "server_host") ?? "192.168.10.233"
         self.serverPort = UserDefaults.standard.string(forKey: "server_port") ?? "8000"
         self.selectedVoice = UserDefaults.standard.string(forKey: "selected_voice") ?? "zh-CN-XiaoxiaoNeural"
         self.selectedPersona = UserDefaults.standard.string(forKey: "selected_persona") ?? "love"
