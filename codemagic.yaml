@@ -4,13 +4,13 @@ workflows:
     environment:
       xcode: latest
     scripts:
-      - name: Clean and Build
+      - name: Generate Xcode project
         script: |
           cd iOS
-          xcodebuild clean -project VoiceMate.xcodeproj \
-            -scheme VoiceMate \
-            -configuration Release \
-            2>&1 | tail -5
+          xcodegen generate
+      - name: Build
+        script: |
+          cd iOS
           xcodebuild \
             -project VoiceMate.xcodeproj \
             -scheme VoiceMate \
