@@ -74,9 +74,11 @@ class RealtimeCallService: NSObject, ObservableObject {
     private var playbackPlayerNode: AVAudioPlayerNode?
     /// Playback audio buffer queue — buffers arriving chunks while player is busy
     private let playbackQueue = DispatchQueue(label: "com.voicemate.playback", qos: .userInitiated)
-    private var pendingBuffers: [AVAudioPCMBuffer] = []
+    private var pendingBuffers: [(AVAudioPCMBuffer, Bool)] = []
     /// Serial queue for scheduling playback buffers to avoid race conditions
     private let scheduleQueue = DispatchQueue(label: "com.voicemate.schedule", qos: .userInitiated)
+    /// Tracks whether playback has ever been started (avoids stop()-before-play crash on iOS 16.x)
+    private var playbackEverStarted = false
 
     private var playbackFormat: AVAudioFormat?
     /// Dedicated mixer node to avoid reconnecting to mainMixer on a running engine
@@ -178,6 +180,7 @@ class RealtimeCallService: NSObject, ObservableObject {
         }
         playbackPlayerNode = nil
         playbackMixerNode = nil
+        playbackEverStarted = false
         
         disconnectWebSocket()
         
@@ -351,6 +354,7 @@ class RealtimeCallService: NSObject, ObservableObject {
                     self.audioSampleRate = sr
                 }
                 self.setupAudioPlayback()
+                self.startPlaybackNode()
             
             case "audio_end":
                 self.onAudioEnd()
@@ -540,8 +544,13 @@ class RealtimeCallService: NSObject, ObservableObject {
         // scheduleBuffer is thread-safe, but serializing through scheduleQueue
         // ensures ordering and avoids races when stop/reset happen concurrently.
         scheduleQueue.async { [weak self] in
-            guard let self = self, let node = self.playbackPlayerNode, node.isPlaying else { return }
-            node.scheduleBuffer(pcmBuffer)
+            guard let self = self, let node = self.playbackPlayerNode else { return }
+            if node.isPlaying {
+                node.scheduleBuffer(pcmBuffer)
+            } else {
+                // Node not yet playing — enqueue; it will be flushed after startPlaybackNode()
+                self.pendingBuffers.append((pcmBuffer, false))
+            }
         }
     }
     
@@ -623,6 +632,8 @@ class RealtimeCallService: NSObject, ObservableObject {
         playbackPlayerNode = playerNode
         playbackMixerNode = mixNode
         do {
+            // Prepare player node before engine start to init scheduler (iOS 16.x safety)
+            playerNode.prepare(withFrameCount: 8820)
             try audioEngine.start()
             isMicActive = true
             logger("Audio capture started (16kHz)")
@@ -751,11 +762,38 @@ class RealtimeCallService: NSObject, ObservableObject {
         )!
         playbackFormat = format
         
-        // Stop and restart the player node to flush any previous TTS buffers.
-        // Stopping/starting a source node on a running engine is safe and does not
-        // reconfigure the audio graph.
-        playerNode.stop()
+        // NOTE: Do NOT call playerNode.stop() here — on iOS 16.x, calling stop()
+        // on a player node that has never been started with play() causes EXC_BAD_ACCESS.
+        // The player will be started/restarted by startPlaybackNode() which is called
+        // immediately after setupAudioPlayback() from the audio_start handler.
+        
+        logger("Audio playback format set (sample rate: \(Int(audioSampleRate)) Hz)")
+    }
+    
+    
+    /// Starts (or restarts) the player node for streaming playback.
+    /// Separated from setupAudioPlayback() to avoid calling stop() on a node
+    /// that has never played — which crashes on iOS 16.x.
+    private func startPlaybackNode() {
+        guard let playerNode = playbackPlayerNode else { return }
+        
+        if playbackEverStarted {
+            // Stop and restart to flush any previous TTS buffers.
+            // Safe because the node was previously started with play().
+            playerNode.stop()
+        }
         playerNode.play()
+        playbackEverStarted = true
+        
+        // Flush any buffers that arrived while the node was stopped/not-yet-playing
+        scheduleQueue.sync { [weak self] in
+            guard let self = self else { return }
+            let pending = self.pendingBuffers
+            self.pendingBuffers.removeAll()
+            for (buffer, _) in pending {
+                playerNode.scheduleBuffer(buffer)
+            }
+        }
         
         // Ensure audio is routed to speaker (not earpiece)
         do {
