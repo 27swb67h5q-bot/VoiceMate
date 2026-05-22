@@ -1486,9 +1486,6 @@ async def ws_voice_realtime(websocket: WebSocket):
                             silence_frames += 1
                             utterance_buffer.extend(frame)
                             silence_duration_ms += chunk_duration_ms
-                        silence_frames += 1
-                        utterance_buffer.extend(frame)
-                        silence_duration_ms += chunk_duration_ms
                         
                         # Check if silence is long enough to end utterance
                         if silence_duration_ms >= SILENCE_DURATION_MS:
