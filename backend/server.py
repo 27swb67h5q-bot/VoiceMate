@@ -1337,6 +1337,12 @@ async def ws_voice_realtime(websocket: WebSocket):
         """Run LLM stream + TTS stream for AI response."""
         nonlocal ai_speaking, ai_speak_task
         
+        # Guard: if already speaking, cancel previous task first
+        if ai_speaking:
+            await handle_barge_in()
+            # Small yield to ensure cancellation completes
+            await asyncio.sleep(0.1)
+        
         async def _speak_task():
             nonlocal ai_speaking
             try:
@@ -1519,12 +1525,8 @@ async def ws_voice_realtime(websocket: WebSocket):
                     conv_id = data["conversation_id"]
                 
                 logger.info(f"User text [{conv_id}]: {text[:80]}")
-                logger.info(f"AI speak started for [{conv_id}]")
                 
-                # Handle barge-in if AI is speaking
-                if ai_speaking:
-                    await handle_barge_in()
-                
+                # ai_speak() handles barge-in internally now
                 # Start AI speak task (LLM + TTS stream)
                 await ai_speak(text)
                 continue

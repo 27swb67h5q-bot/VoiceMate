@@ -251,6 +251,22 @@ struct ContentView: View {
     
     private var textFieldArea: some View {
         HStack(spacing: 6) {
+            // Microphone toggle button — switches back to voice recording mode
+            Button(action: {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    inputMode = .voice
+                    isTextFieldFocused = false
+                    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                }
+            }) {
+                Image(systemName: "mic.fill")
+                    .font(.system(size: 16))
+                    .foregroundColor(.purple)
+                    .frame(width: 32, height: 32)
+                    .background(Color(.systemGray5))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+            
             TextField("输入消息...", text: $textInput)
                 .font(.body)
                 .focused($isTextFieldFocused)
