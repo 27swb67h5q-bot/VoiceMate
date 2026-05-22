@@ -463,6 +463,8 @@ class RealtimeCallService: NSObject, ObservableObject {
                     node.stop()
                 }
                 self.setupAudioPlayback()
+                // Re-assert speaker route in case the system reverted to earpiece
+                try? AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker)
                 self.startPlaybackNode()
             
             case "audio_end":
@@ -750,6 +752,10 @@ class RealtimeCallService: NSObject, ObservableObject {
             // Prepare player node before engine start to init scheduler (iOS 16.x safety)
             playerNode.prepare(withFrameCount: 8820)
             try audioEngine.start()
+            // Override output port to speaker again after engine starts, because
+            // starting AVAudioEngine with .voiceChat mode resets the audio route
+            // from speaker back to earpiece.
+            try AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker)
             isMicActive = true
             logger("Audio capture started (16kHz)")
         } catch {
