@@ -74,7 +74,7 @@ class LiveKitCallService: NSObject, ObservableObject {
         durationTimer = nil
         
         Task {
-            await room?.disconnect()
+            try await room?.disconnect()
             room = nil
             localParticipant = nil
         }
@@ -104,8 +104,8 @@ class LiveKitCallService: NSObject, ObservableObject {
             // Use default audio configuration; LiveKit manages VAD, AEC, etc.
             let audioOptions = AudioCaptureOptions(
                 echoCancellation: true,
-                autoGainControl: true,
-                noiseSuppression: true
+                noiseSuppression: true,
+                autoGainControl: true
             )
             
             // 4. Connect with room options
@@ -122,7 +122,7 @@ class LiveKitCallService: NSObject, ObservableObject {
             )
             
             // 5. Publish microphone
-            try await room.localParticipant.setMicrophone(enabled: true)
+            try await room.localParticipant!.setMicrophone(enabled: true)
             
             // Mark the call as active
             DispatchQueue.main.async {
@@ -211,11 +211,11 @@ extension LiveKitCallService: RoomDelegate {
         }
     }
     
-    func room(_ room: Room, participantDidConnect participant: RemoteParticipant) {
+    func room(_ room: Room, participantDidJoin participant: RemoteParticipant) {
         logger("Remote participant joined: \(String(describing: participant.identity))")
     }
     
-    func room(_ room: Room, participantDidDisconnect participant: RemoteParticipant) {
+    func room(_ room: Room, participantDidLeave participant: RemoteParticipant) {
         logger("Remote participant left: \(String(describing: participant.identity))")
     }
     
