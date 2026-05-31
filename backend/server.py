@@ -1202,6 +1202,14 @@ MIN_UTTERANCE_MS = 800     # minimum utterance length to process (ms) — ignore
 SAMPLE_RATE = 16000        # iOS sends 16kHz PCM16 mono
 BYTES_PER_SAMPLE = 2
 
+# Conservative defaults reduce false triggers from room noise and background speech.
+VAD_NOISE_FLOOR_DECAY = float(os.environ.get("VOICEMATE_VAD_NOISE_FLOOR_DECAY", "0.98"))
+VAD_NOISE_FLOOR_INIT = float(os.environ.get("VOICEMATE_VAD_NOISE_FLOOR_INIT", "120.0"))
+VAD_SPEECH_RATIO = float(os.environ.get("VOICEMATE_VAD_SPEECH_RATIO", "3.0"))
+VAD_FLOOR_MIN = float(os.environ.get("VOICEMATE_VAD_FLOOR_MIN", "45.0"))
+SILENCE_DURATION_MS = int(os.environ.get("VOICEMATE_VAD_SILENCE_MS", "1400"))
+MIN_UTTERANCE_MS = int(os.environ.get("VOICEMATE_VAD_MIN_UTTERANCE_MS", "1100"))
+
 
 async def _stream_tts_to_websocket(websocket, text: str, voice=None, speed_ratio=None):
     """Generate TTS audio and stream it as PCM chunks via WebSocket.
@@ -1309,7 +1317,7 @@ async def ws_voice_realtime(websocket: WebSocket):
     speed = None
     
     # VAD state (WebRTC VAD)
-    vad = webrtcvad.Vad(mode=2)
+    vad = webrtcvad.Vad(mode=int(os.environ.get("VOICEMATE_WEBRTC_VAD_MODE", "3")))
     noise_floor = VAD_NOISE_FLOOR_INIT  # adaptive noise floor estimate (decays toward silence RMS)
     vad_buffer = bytearray()        # PCM buffer to accumulate VAD frame (480 bytes for 30ms @ 16kHz)
     silence_frames = 0              # consecutive silent frames
@@ -1330,6 +1338,8 @@ async def ws_voice_realtime(websocket: WebSocket):
     barge_in_speech_frames = 0           # consecutive speech frames detected during AI speaking
     barge_in_silence_frames = 0          # consecutive silence during barge-in window
     barge_in_cooldown = 0                # frames remaining in cooldown after rejected barge-in
+    VAD_CONFIRM_FRAMES = int(os.environ.get("VOICEMATE_VAD_CONFIRM_FRAMES", "9"))
+    BARGE_IN_CONFIRM_FRAMES = int(os.environ.get("VOICEMATE_BARGE_IN_CONFIRM_FRAMES", "12"))
     
     # ASR service placeholder (uses external API; for now we simulate with a simple approach)
     # In production, replace with Deepgram / Azure / Aliyun real-time ASR
@@ -1404,6 +1414,20 @@ async def ws_voice_realtime(websocket: WebSocket):
         """Check if text is just filler/thinking noise (e.g., "嗯", "um", "啊")."""
         stripped = text.strip().rstrip(".。!！?？,，…").lower()
         return stripped in FILLER_WORDS
+
+    def _is_filler_text(text: str) -> bool:
+        compact = re.sub(r"[\s，。！？、,.!?~～…]+", "", (text or "").strip().lower())
+        filler = set(FILLER_WORDS) | {"嗯", "啊", "哦", "额", "呃", "哎", "喂", "um", "uh", "ah", "er", "hmm"}
+        if compact in filler or len(compact) < int(os.environ.get("VOICEMATE_ASR_MIN_TEXT_CHARS", "2")):
+            return True
+        if os.environ.get("VOICEMATE_ASR_REQUIRE_WAKE_WORD", "0").lower() in {"1", "true", "yes"}:
+            wake_words = [
+                w.strip()
+                for w in os.environ.get("VOICEMATE_ASR_WAKE_WORDS", "小妤,妤妤,VoiceMate").split(",")
+                if w.strip()
+            ]
+            return not any(re.sub(r"[\s，。！？、,.!?~～…]+", "", w.lower()) in compact for w in wake_words)
+        return False
 
     async def ai_speak(ai_text: str):
         """Run LLM stream + TTS stream for AI response."""

@@ -38,6 +38,8 @@ import logging
 import uuid
 import time
 import struct
+import math
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, AsyncIterator, AsyncIterable
@@ -87,6 +89,35 @@ LIVEKIT_API_KEY = os.environ.get("LIVEKIT_API_KEY", "")
 LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "")
 LIVEKIT_AGENT_NAME = os.environ.get("LIVEKIT_AGENT_NAME", "VoiceMate")
 
+# Noise/side-speech rejection. Tune these from .env if the room is very quiet/loud.
+ASR_MIN_AUDIO_SECONDS = float(os.environ.get("VOICEMATE_ASR_MIN_AUDIO_SECONDS", "0.75"))
+ASR_MIN_RMS = float(os.environ.get("VOICEMATE_ASR_MIN_RMS", "180"))
+ASR_MAX_NO_SPEECH_PROB = float(os.environ.get("VOICEMATE_ASR_MAX_NO_SPEECH_PROB", "0.65"))
+ASR_MIN_TEXT_CHARS = int(os.environ.get("VOICEMATE_ASR_MIN_TEXT_CHARS", "2"))
+ASR_REQUIRE_WAKE_WORD = os.environ.get("VOICEMATE_ASR_REQUIRE_WAKE_WORD", "0").lower() in {"1", "true", "yes"}
+ASR_WAKE_WORDS = tuple(
+    w.strip()
+    for w in os.environ.get("VOICEMATE_ASR_WAKE_WORDS", "小妤,妤妤,VoiceMate").split(",")
+    if w.strip()
+)
+
+
+def _normalize_asr_text(text: str) -> str:
+    return re.sub(r"[\s，。！？、,.!?~～…]+", "", text or "").lower()
+
+
+def _is_noise_text(text: str) -> bool:
+    normalized = _normalize_asr_text(text)
+    if len(normalized) < ASR_MIN_TEXT_CHARS:
+        return True
+    filler = {_normalize_asr_text(w) for w in FILLER_WORDS}
+    filler.update({"嗯", "啊", "哦", "额", "呃", "哎", "喂", "um", "uh", "ah", "er", "hmm"})
+    if normalized in filler:
+        return True
+    if ASR_REQUIRE_WAKE_WORD:
+        return not any(_normalize_asr_text(w) in normalized for w in ASR_WAKE_WORDS)
+    return False
+
 
 # ── Custom STT: Whisper ──────────────────────────────────────────────────────
 
@@ -118,7 +149,7 @@ class WhisperSTT(stt.STT):
             )
         logger.info(f"Loaded faster-whisper model: {size}")
 
-    def _audio_buffer_to_wav(self, buffer: AudioBuffer) -> bytes:
+    def _audio_buffer_to_wav(self, buffer: AudioBuffer) -> tuple[bytes, float, float]:
         """Convert LiveKit AudioBuffer to WAV bytes (downmix to 16kHz 16-bit mono)."""
         import io
         import wave
@@ -138,13 +169,21 @@ class WhisperSTT(stt.STT):
                 raw = bytes(raw)
             pcm_data.extend(raw)
 
+        sample_count = len(pcm_data) // 2
+        if sample_count:
+            samples = struct.unpack_from(f"<{sample_count}h", bytes(pcm_data))
+            rms = math.sqrt(sum(s * s for s in samples) / sample_count)
+        else:
+            rms = 0.0
+        duration_seconds = sample_count / 16000
+
         buf = io.BytesIO()
         with wave.open(buf, "wb") as wf:
             wf.setnchannels(1)
             wf.setsampwidth(2)
             wf.setframerate(16000)  # LiveKit default audio rate for STT
             wf.writeframes(bytes(pcm_data))
-        return buf.getvalue()
+        return buf.getvalue(), duration_seconds, rms
 
     async def _recognize_impl(
         self,
@@ -160,7 +199,17 @@ class WhisperSTT(stt.STT):
             if self._local_model_size and self._local_model is None:
                 await self._load_local_model()
 
-            wav_bytes = self._audio_buffer_to_wav(buffer)
+            wav_bytes, duration_seconds, rms = self._audio_buffer_to_wav(buffer)
+            if duration_seconds < ASR_MIN_AUDIO_SECONDS or rms < ASR_MIN_RMS:
+                logger.info(
+                    "STT rejected short/quiet audio: %.2fs rms=%.1f",
+                    duration_seconds,
+                    rms,
+                )
+                return stt.SpeechEvent(
+                    type=stt.SpeechEventType.END_OF_SPEECH,
+                    alternatives=[],
+                )
 
             if self._local_model:
                 import concurrent.futures
@@ -171,10 +220,27 @@ class WhisperSTT(stt.STT):
                     with concurrent.futures.ThreadPoolExecutor() as pool:
                         segments, _ = await asyncio.get_event_loop().run_in_executor(
                             pool, lambda: self._local_model.transcribe(
-                                temp_path, language=lang, beam_size=5
+                                temp_path,
+                                language=lang,
+                                beam_size=5,
+                                vad_filter=True,
+                                vad_parameters={
+                                    "min_speech_duration_ms": 450,
+                                    "min_silence_duration_ms": 700,
+                                    "speech_pad_ms": 150,
+                                },
                             )
                         )
-                    text = "".join(seg.text for seg in segments).strip()
+                    segment_list = list(segments)
+                    max_no_speech_prob = max(
+                        (getattr(seg, "no_speech_prob", 0.0) for seg in segment_list),
+                        default=0.0,
+                    )
+                    if max_no_speech_prob > ASR_MAX_NO_SPEECH_PROB:
+                        logger.info("STT rejected no-speech probability: %.2f", max_no_speech_prob)
+                        text = ""
+                    else:
+                        text = "".join(seg.text for seg in segment_list).strip()
                 except Exception as e:
                     logger.warning(f"Local Whisper failed: {e}")
                     text = ""
@@ -195,7 +261,7 @@ class WhisperSTT(stt.STT):
                     logger.warning(f"Whisper API failed: {e}")
                     text = ""
 
-            if not text:
+            if not text or _is_noise_text(text):
                 logger.info("STT: empty transcription")
                 return stt.SpeechEvent(
                     type=stt.SpeechEventType.END_OF_SPEECH,
@@ -483,9 +549,9 @@ class VoiceMateAgent(Agent):
             llm=self._deepseek_llm,
             tts=self._edge_tts,
             allow_interruptions=True,       # Barge-in
-            min_endpointing_delay=0.8,
-            max_endpointing_delay=2.0,
-            min_consecutive_speech_delay=0.5,
+            min_endpointing_delay=float(os.environ.get("VOICEMATE_MIN_ENDPOINTING_DELAY", "1.1")),
+            max_endpointing_delay=float(os.environ.get("VOICEMATE_MAX_ENDPOINTING_DELAY", "2.4")),
+            min_consecutive_speech_delay=float(os.environ.get("VOICEMATE_MIN_CONSECUTIVE_SPEECH_DELAY", "0.75")),
             **kwargs,
         )
 
