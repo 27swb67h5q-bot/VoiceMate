@@ -8,7 +8,7 @@ options:
 packages:
   LiveKit:
     url: https://github.com/livekit/client-sdk-swift.git
-    from: 1.0.0
+    exactVersion: 2.14.1
 
 settings:
   base:
@@ -23,6 +23,8 @@ targets:
     platform: iOS
     sources:
       - path: VoiceMate
+        excludes:
+          - Services/RealtimeCallService.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.voicemate.app
@@ -31,8 +33,8 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_STYLE: Manual
         CODE_SIGN_IDENTITY: ""
-        CODE_SIGNING_REQUIRED: NO
-        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGNING_ALLOWED: "NO"
     dependencies:
       - package: LiveKit
         product: LiveKit

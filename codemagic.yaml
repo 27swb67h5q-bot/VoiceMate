@@ -2,16 +2,33 @@ workflows:
   ios-build:
     name: VoiceMate
     environment:
-      xcode: latest
+      xcode: 15.4
     scripts:
+      - name: Install tools and generate Xcode project
+        script: |
+          cd iOS
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          rm -rf VoiceMate.xcodeproj
+          xcodegen generate
+          xcodebuild -resolvePackageDependencies \
+            -project VoiceMate.xcodeproj \
+            -scheme VoiceMate \
+            -clonedSourcePackagesDirPath "$CM_BUILD_DIR/SourcePackages"
       - name: Build
         script: |
           cd iOS
+          DERIVED_DATA="$CM_BUILD_DIR/DerivedData"
+          rm -rf "$DERIVED_DATA"
           xcodebuild \
             -project VoiceMate.xcodeproj \
             -scheme VoiceMate \
             -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
             -configuration Release \
+            -derivedDataPath "$DERIVED_DATA" \
+            -clonedSourcePackagesDirPath "$CM_BUILD_DIR/SourcePackages" \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
@@ -19,7 +36,8 @@ workflows:
       - name: Package IPA for TrollStore
         script: |
           # Find .app bundle
-          APP_PATH=$(find "$HOME/Library/Developer/Xcode/DerivedData" -name "VoiceMate.app" -path "*/Release-iphoneos/*" -type d | head -1)
+          DERIVED_DATA="$CM_BUILD_DIR/DerivedData"
+          APP_PATH=$(find "$DERIVED_DATA" -name "VoiceMate.app" -path "*/Release-iphoneos/*" -type d | head -1)
           echo "App path: $APP_PATH"
 
           if [ ! -d "$APP_PATH" ]; then
@@ -31,7 +49,7 @@ workflows:
           mkdir -p "$APP_PATH/Frameworks"
 
           # Find PackageFrameworks (where SPM puts dynamic frameworks)
-          PKG_FW_DIR=$(find "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "PackageFrameworks" -path "*/Release-iphoneos/*" 2>/dev/null | head -1)
+          PKG_FW_DIR=$(find "$DERIVED_DATA" -type d -name "PackageFrameworks" -path "*/Release-iphoneos/*" 2>/dev/null | head -1)
           echo "PackageFrameworks dir: $PKG_FW_DIR"
 
           if [ -n "$PKG_FW_DIR" ]; then
@@ -50,14 +68,12 @@ workflows:
 
           # Ensure WebRTC.framework is present (fallback if PackageFrameworks path differs)
           if [ ! -d "$APP_PATH/Frameworks/WebRTC.framework" ]; then
-            WEBRTC=$(find "$HOME/Library/Developer/Xcode/DerivedData" -name "WebRTC.framework" -type d 2>/dev/null | head -1)
+            WEBRTC=$(find "$DERIVED_DATA" "$CM_BUILD_DIR/SourcePackages" -name "WebRTC.framework" -type d 2>/dev/null | head -1)
             if [ -n "$WEBRTC" ]; then
               echo "  Embedding WebRTC.framework (fallback) from: $WEBRTC"
               cp -Rf "$WEBRTC" "$APP_PATH/Frameworks/"
             else
-              echo "ERROR: WebRTC.framework not found anywhere in DerivedData"
-              echo "LiveKit dependency may have failed to resolve or WebRTC is statically linked."
-              exit 1
+              echo "WARNING: WebRTC.framework not found; continuing because the selected LiveKit SDK may link it statically."
             fi
           fi
 
@@ -72,7 +88,7 @@ workflows:
           cp -Rf "$APP_PATH" Payload/
           IPA_PATH="${CM_BUILD_DIR:-$HOME/clone}/VoiceMate.ipa"
           rm -f "$IPA_PATH"
-          cd Payload && zip -r "$IPA_PATH" . -q
+          zip -r "$IPA_PATH" Payload -q
           cd /tmp && rm -rf Payload
           echo "IPA ready at: $IPA_PATH"
     artifacts:

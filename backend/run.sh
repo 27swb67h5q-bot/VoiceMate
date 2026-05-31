@@ -11,5 +11,11 @@ if [ -f "$HERMES_ENV" ]; then
     export DEEPSEEK_API_KEY
 fi
 
-# Use local venv (has torch + ChatTTS)
-exec "$SCRIPT_DIR/venv/bin/python" "$SCRIPT_DIR/server.py" "$@"
+# Use local venv when present; otherwise fall back to the active Python.
+if [ -x "$SCRIPT_DIR/venv/bin/python" ]; then
+    PYTHON="$SCRIPT_DIR/venv/bin/python"
+else
+    PYTHON="${PYTHON:-python3}"
+fi
+
+exec "$PYTHON" "$SCRIPT_DIR/server.py" "$@"

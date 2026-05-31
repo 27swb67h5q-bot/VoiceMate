@@ -21,20 +21,35 @@ import json
 import asyncio
 import logging
 import time
+import shutil
 from pathlib import Path
 from typing import Optional
 import aiohttp
 
 
-import torch
-import soundfile as sf
-import numpy as np
+try:
+    import torch  # noqa: F401
+except ImportError:
+    torch = None
+
+try:
+    import soundfile as sf  # noqa: F401
+except ImportError:
+    sf = None
+
+try:
+    import numpy as np  # noqa: F401
+except ImportError:
+    np = None
 import struct
 import io
 import math
 
 # ChatTTS compatibility: PyTorch 2.12+ requires weights_only=False for tokenizer
-import ChatTTS.core as _chattts_core
+try:
+    import ChatTTS.core as _chattts_core  # noqa: F401
+except ImportError:
+    _chattts_core = None
 # The tokenizer path is already patched to use weights_only=False
 
 # Load .env file if present
@@ -47,12 +62,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 
-from livekit.api import AccessToken, VideoGrants
+try:
+    from livekit.api import AccessToken, VideoGrants
+except ImportError:
+    AccessToken = None
+    VideoGrants = None
 # ── Config ──────────────────────────────────────────────────────────────────
 
 HOST = os.environ.get("VOICEMATE_HOST", "0.0.0.0")
 PORT = int(os.environ.get("VOICEMATE_PORT", "8000"))
-AUDIO_DIR = Path(os.environ.get("VOICEMATE_AUDIO_DIR", "/root/VoiceMate/audio_cache"))
+BASE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = BASE_DIR.parent
+AUDIO_DIR = Path(os.environ.get("VOICEMATE_AUDIO_DIR", str(BASE_DIR / "audio_cache")))
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
@@ -66,7 +87,7 @@ FISH_AUDIO_API_KEY = os.environ.get("FISH_AUDIO_API_KEY", "")
 FISH_AUDIO_BASE_URL = "https://api.fish.audio/v1"
 TTS_RATE = os.environ.get("VOICEMATE_TTS_RATE", "+0%")
 TTS_VOLUME = os.environ.get("VOICEMATE_TTS_VOLUME", "+0%")
-CLONE_DIR = Path(os.environ.get("VOICEMATE_CLONE_DIR", "/root/VoiceMate/cloned_voices"))
+CLONE_DIR = Path(os.environ.get("VOICEMATE_CLONE_DIR", str(PROJECT_ROOT / "cloned_voices")))
 CLONE_DIR.mkdir(parents=True, exist_ok=True)
 
 # Filler/filler words to skip LLM calls (user thinking noises like "嗯", "um", "uh")
@@ -139,7 +160,8 @@ class CloneVoiceInfo(BaseModel):
 
 class HistoryManager:
     """Persists conversation history to disk for context memory."""
-    def __init__(self, history_dir="/root/.hermes/voicemate_history"):
+    def __init__(self, history_dir=None):
+        history_dir = history_dir or os.environ.get("VOICEMATE_HISTORY_DIR") or str(BASE_DIR / "history")
         self.history_dir = Path(history_dir)
         self.history_dir.mkdir(parents=True, exist_ok=True)
 
@@ -167,7 +189,7 @@ class HistoryManager:
 
 class DeepSeekClient:
     def __init__(self):
-        self.api_key = DEEPSEEK_API_KEY
+        self.api_key = DEEPSEEK_API_KEY or os.environ.get("OPENAI_API_KEY", "") or "missing-key"
         self.base_url = DEEPSEEK_BASE_URL
         self.model = DEEPSEEK_MODEL
         # We'll use the openai client library (already in Hermes venv)
@@ -640,8 +662,8 @@ class TTSEngine:
                 output_path,
             ], capture_output=True, timeout=30)
         else:
-            # No ambient file, just copy
-            subprocess.run(["cp", raw_path, output_path], capture_output=True)
+            # No ambient file, just copy. Use Python copy for Windows compatibility.
+            shutil.copyfile(raw_path, output_path)
 
         logger.info(f"TTS generated [{emotion}] in {elapsed:.2f}s -> {output_path} ({duration_ms}ms)")
         return output_path, duration_ms
@@ -1166,7 +1188,10 @@ _load_clone_db()
 
 
 # WebRTC VAD configuration
-import webrtcvad
+try:
+    import webrtcvad
+except ImportError:
+    webrtcvad = None
 VAD_FRAME_MS = 30           # webrtcvad requires 10/20/30ms frames; 30ms = 480 bytes at 16kHz 16-bit
 VAD_NOISE_FLOOR_DECAY = 0.97     # leaky integrator decay for tracking noise floor: 0.97 = even slower adaptation (〜33 frames to rise)
 VAD_NOISE_FLOOR_INIT = 80.0      # initial noise floor estimate (RMS) — higher to avoid initial false triggers
@@ -1270,6 +1295,13 @@ async def ws_voice_realtime(websocket: WebSocket):
       6. Client microphone is ALWAYS open; barge-in is detected on client side
     """
     await websocket.accept()
+    if webrtcvad is None:
+        await websocket.send_json({
+            "type": "error",
+            "message": "webrtcvad dependency is not installed. Install backend/requirements.txt.",
+        })
+        await websocket.close(code=1011)
+        return
     
     conv_id = str(uuid.uuid4())
     persona = DEFAULT_PERSONA
@@ -1698,23 +1730,33 @@ LIVEKIT_PORT = int(os.environ.get("LIVEKIT_PORT", "7880"))
 ROOM_NAME = "voicemate"
 
 
+class LiveKitTokenRequest(BaseModel):
+    voice: Optional[str] = None
+    persona: Optional[str] = None
+    speed: Optional[float] = None
+    room: Optional[str] = None
+
+
 # ── LiveKit Token Endpoint ──────────────────────────────────────────────────────
 
 @app.post("/v1/livekit/token")
-async def create_livekit_token():
+async def create_livekit_token(request: Optional[LiveKitTokenRequest] = None):
     """
     Generate a LiveKit access token for joining the VoiceMate room.
     """
     try:
+        if AccessToken is None or VideoGrants is None:
+            raise RuntimeError("livekit-api dependency is not installed. Install backend/requirements.txt.")
         logger.info(f"Generating LiveKit token: key={LIVEKIT_API_KEY[:10]}... secret={LIVEKIT_API_SECRET[:10]}...")
         identity = f"voicemate-{uuid.uuid4().hex[:12]}"
+        room_name = request.room if request and request.room else f"{ROOM_NAME}-{uuid.uuid4().hex[:8]}"
 
         token = AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
         token.identity = identity
         token.ttl = timedelta(hours=2)
         token.with_grants(VideoGrants(
             room_join=True,
-            room=ROOM_NAME,
+            room=room_name,
             can_publish=True,
             can_subscribe=True,
             can_publish_data=True,
@@ -1724,8 +1766,11 @@ async def create_livekit_token():
 
         return {
             "token": jwt,
-            "room": ROOM_NAME,
+            "room": room_name,
             "url": f"ws://{LIVEKIT_HOST}:{LIVEKIT_PORT}",
+            "voice": request.voice if request else None,
+            "persona": request.persona if request else None,
+            "speed": request.speed if request else None,
         }
     except Exception as e:
         logger.exception(f"LiveKit token generation failed: {e}")
@@ -1758,9 +1803,7 @@ async def get_proactive_message(persona: str = "love"):
 
 def main():
     if not DEEPSEEK_API_KEY:
-        logger.error("DEEPSEEK_API_KEY not set! Set it in environment or .env file.")
-        logger.info("Create a .env file with: DEEPSEEK_API_KEY=sk-...")
-        sys.exit(1)
+        logger.warning("DEEPSEEK_API_KEY not set. /v1/health and /v1/livekit/token can still run, but chat replies will use the error fallback.")
 
     logger.info(f"Starting VoiceMate API on {HOST}:{PORT}")
     logger.info(f"DeepSeek model: {DEEPSEEK_MODEL}")
@@ -1777,5 +1820,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-

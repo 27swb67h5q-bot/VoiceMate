@@ -41,11 +41,6 @@ class LiveKitCallService: NSObject, ObservableObject {
         "http://\(serverHost):\(serverPort)/v1/livekit/token"
     }
     
-    /// WebSocket URL for LiveKit server
-    private var liveKitURL: String {
-        "ws://\(serverHost):7880"
-    }
-    
     // MARK: - Timer
     private var durationTimer: Timer?
     
@@ -94,7 +89,7 @@ class LiveKitCallService: NSObject, ObservableObject {
     private func joinRoom() async {
         do {
             // 1. Get token from backend
-            let token = try await fetchToken()
+            let connection = try await fetchToken()
             
             // 2. Configure LiveKit room
             let room = Room(delegate: self)
@@ -116,8 +111,8 @@ class LiveKitCallService: NSObject, ObservableObject {
             )
             
             try await room.connect(
-                url: liveKitURL,
-                token: token,
+                url: connection.url,
+                token: connection.token,
                 roomOptions: roomOptions
             )
             
@@ -143,7 +138,7 @@ class LiveKitCallService: NSObject, ObservableObject {
     
     /// Fetch a LiveKit join token from the VoiceMate backend.
     /// The backend generates a token scoped to a unique room for this session.
-    private func fetchToken() async throws -> String {
+    private func fetchToken() async throws -> LiveKitConnectionInfo {
         let url = URL(string: tokenEndpoint)!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -162,17 +157,22 @@ class LiveKitCallService: NSObject, ObservableObject {
         
         guard let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200 else {
-            throw LiveKitError.invalidTokenResponse
+            throw VoiceMateLiveKitError.invalidTokenResponse
         }
         
         struct TokenResponse: Codable {
             let token: String
             let room: String
+            let url: String?
         }
         
         let tokenResponse = try JSONDecoder().decode(TokenResponse.self, from: data)
         logger("Got LiveKit token for room: \(tokenResponse.room)")
-        return tokenResponse.token
+        return LiveKitConnectionInfo(
+            token: tokenResponse.token,
+            room: tokenResponse.room,
+            url: tokenResponse.url ?? "ws://\(serverHost):7880"
+        )
     }
     
     // MARK: - Timer
@@ -320,7 +320,13 @@ extension LiveKitCallService: RoomDelegate {
 
 // MARK: - Errors
 
-enum LiveKitError: LocalizedError {
+struct LiveKitConnectionInfo {
+    let token: String
+    let room: String
+    let url: String
+}
+
+enum VoiceMateLiveKitError: LocalizedError {
     case invalidTokenResponse
     
     var errorDescription: String? {
