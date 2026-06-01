@@ -69,7 +69,7 @@ class LiveKitCallService: NSObject, ObservableObject {
         durationTimer = nil
         
         Task {
-            try await room?.disconnect()
+            await room?.disconnect()
             room = nil
             localParticipant = nil
         }
@@ -212,15 +212,15 @@ extension LiveKitCallService: RoomDelegate {
         }
     }
     
-    func room(_ room: Room, participantDidJoin participant: RemoteParticipant) {
+    func room(_ room: Room, participantDidConnect participant: RemoteParticipant) {
         logger("Remote participant joined: \(String(describing: participant.identity))")
     }
     
-    func room(_ room: Room, participantDidLeave participant: RemoteParticipant) {
+    func room(_ room: Room, participantDidDisconnect participant: RemoteParticipant) {
         logger("Remote participant left: \(String(describing: participant.identity))")
     }
     
-    func room(_ room: Room, participant: RemoteParticipant, didSubscribeToTrack publication: RemoteTrackPublication) {
+    func room(_ room: Room, participant: RemoteParticipant, didSubscribeTrack publication: RemoteTrackPublication) {
         logger("Subscribed to track: \(publication.sid)")
         
         if publication.track is AudioTrack {
@@ -233,7 +233,7 @@ extension LiveKitCallService: RoomDelegate {
         }
     }
     
-    func room(_ room: Room, participant: RemoteParticipant, didUnsubscribeFromTrack publication: RemoteTrackPublication) {
+    func room(_ room: Room, participant: RemoteParticipant, didUnsubscribeTrack publication: RemoteTrackPublication) {
         logger("Unsubscribed from track: \(publication.sid)")
         
         DispatchQueue.main.async {
