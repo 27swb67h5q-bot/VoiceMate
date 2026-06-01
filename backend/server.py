@@ -1205,10 +1205,10 @@ BYTES_PER_SAMPLE = 2
 # Conservative defaults reduce false triggers from room noise and background speech.
 VAD_NOISE_FLOOR_DECAY = float(os.environ.get("VOICEMATE_VAD_NOISE_FLOOR_DECAY", "0.98"))
 VAD_NOISE_FLOOR_INIT = float(os.environ.get("VOICEMATE_VAD_NOISE_FLOOR_INIT", "120.0"))
-VAD_SPEECH_RATIO = float(os.environ.get("VOICEMATE_VAD_SPEECH_RATIO", "3.0"))
+VAD_SPEECH_RATIO = float(os.environ.get("VOICEMATE_VAD_SPEECH_RATIO", "2.8"))
 VAD_FLOOR_MIN = float(os.environ.get("VOICEMATE_VAD_FLOOR_MIN", "45.0"))
-SILENCE_DURATION_MS = int(os.environ.get("VOICEMATE_VAD_SILENCE_MS", "1400"))
-MIN_UTTERANCE_MS = int(os.environ.get("VOICEMATE_VAD_MIN_UTTERANCE_MS", "1100"))
+SILENCE_DURATION_MS = int(os.environ.get("VOICEMATE_VAD_SILENCE_MS", "850"))
+MIN_UTTERANCE_MS = int(os.environ.get("VOICEMATE_VAD_MIN_UTTERANCE_MS", "700"))
 
 
 async def _stream_tts_to_websocket(websocket, text: str, voice=None, speed_ratio=None):
@@ -1256,14 +1256,14 @@ async def _stream_tts_to_websocket(websocket, text: str, voice=None, speed_ratio
     # Signal audio start
     await websocket.send_json({"type": "audio_start", "sample_rate": 24000, "channels": 1})
     
-    # Stream PCM chunks (50ms = 2400 bytes at 24000Hz 16-bit mono)
-    chunk_size = 2400
+    # Stream PCM chunks (20ms = 960 bytes at 24000Hz 16-bit mono)
+    chunk_size = 960
     offset = 0
     while offset < len(pcm_data):
         end = min(offset + chunk_size, len(pcm_data))
         await websocket.send_bytes(pcm_data[offset:end])
         offset = end
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(0.004)
     
     await websocket.send_json({"type": "audio_end"})
 
@@ -1338,8 +1338,8 @@ async def ws_voice_realtime(websocket: WebSocket):
     barge_in_speech_frames = 0           # consecutive speech frames detected during AI speaking
     barge_in_silence_frames = 0          # consecutive silence during barge-in window
     barge_in_cooldown = 0                # frames remaining in cooldown after rejected barge-in
-    VAD_CONFIRM_FRAMES = int(os.environ.get("VOICEMATE_VAD_CONFIRM_FRAMES", "9"))
-    BARGE_IN_CONFIRM_FRAMES = int(os.environ.get("VOICEMATE_BARGE_IN_CONFIRM_FRAMES", "12"))
+    VAD_CONFIRM_FRAMES = int(os.environ.get("VOICEMATE_VAD_CONFIRM_FRAMES", "6"))
+    BARGE_IN_CONFIRM_FRAMES = int(os.environ.get("VOICEMATE_BARGE_IN_CONFIRM_FRAMES", "8"))
     
     # ASR service placeholder (uses external API; for now we simulate with a simple approach)
     # In production, replace with Deepgram / Azure / Aliyun real-time ASR

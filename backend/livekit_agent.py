@@ -88,6 +88,7 @@ LIVEKIT_URL = os.environ.get("LIVEKIT_URL", "ws://localhost:7880")
 LIVEKIT_API_KEY = os.environ.get("LIVEKIT_API_KEY", "")
 LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "")
 LIVEKIT_AGENT_NAME = os.environ.get("LIVEKIT_AGENT_NAME", "VoiceMate")
+LLM_MAX_TOKENS = int(os.environ.get("VOICEMATE_LLM_MAX_TOKENS", "140"))
 
 # Noise/side-speech rejection. Tune these from .env if the room is very quiet/loud.
 ASR_MIN_AUDIO_SECONDS = float(os.environ.get("VOICEMATE_ASR_MIN_AUDIO_SECONDS", "0.75"))
@@ -435,7 +436,7 @@ class DeepSeekLLMStream(llm.LLMStream):
             response = await self._llm._client.chat.completions.create(
                 model=self._llm._model,
                 messages=enriched,
-                max_tokens=200,
+                max_tokens=LLM_MAX_TOKENS,
                 temperature=0.8,
                 stream=True,
             )
@@ -622,9 +623,9 @@ class VoiceMateAgent(Agent):
             llm=self._deepseek_llm,
             tts=self._edge_tts,
             allow_interruptions=True,       # Barge-in
-            min_endpointing_delay=float(os.environ.get("VOICEMATE_MIN_ENDPOINTING_DELAY", "1.1")),
-            max_endpointing_delay=float(os.environ.get("VOICEMATE_MAX_ENDPOINTING_DELAY", "2.4")),
-            min_consecutive_speech_delay=float(os.environ.get("VOICEMATE_MIN_CONSECUTIVE_SPEECH_DELAY", "0.75")),
+            min_endpointing_delay=float(os.environ.get("VOICEMATE_MIN_ENDPOINTING_DELAY", "0.55")),
+            max_endpointing_delay=float(os.environ.get("VOICEMATE_MAX_ENDPOINTING_DELAY", "1.25")),
+            min_consecutive_speech_delay=float(os.environ.get("VOICEMATE_MIN_CONSECUTIVE_SPEECH_DELAY", "0.35")),
             **kwargs,
         )
 
