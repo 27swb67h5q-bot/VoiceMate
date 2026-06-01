@@ -665,8 +665,10 @@ async def entrypoint(ctx: JobContext):
 
 def main():
     if not DEEPSEEK_API_KEY:
-        logger.error("DEEPSEEK_API_KEY not set! Set in environment or .env file.")
-        sys.exit(1)
+        logger.warning(
+            "DEEPSEEK_API_KEY not set. The LiveKit agent can start, "
+            "but LLM calls will use the error fallback until a key is configured."
+        )
 
     if not LIVEKIT_URL or not LIVEKIT_API_KEY or not LIVEKIT_API_SECRET:
         logger.warning("LiveKit credentials not fully configured.")
