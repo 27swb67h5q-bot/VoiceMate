@@ -56,6 +56,10 @@ except ImportError:
 # Load .env file if present
 from dotenv import load_dotenv
 load_dotenv()
+os.environ.setdefault(
+    "HF_ENDPOINT",
+    os.environ.get("VOICEMATE_HF_ENDPOINT", "https://huggingface.co"),
+)
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse
@@ -1028,7 +1032,42 @@ class ASREngine:
         self.model_size = VOICEMATE_ASR_MODEL
         self.device = VOICEMATE_ASR_DEVICE
         self.compute_type = VOICEMATE_ASR_COMPUTE_TYPE
+        self.model_repo = os.environ.get("VOICEMATE_ASR_REPO", f"Systran/faster-whisper-{self.model_size}")
+        self.model_dir = Path(os.environ.get(
+            "VOICEMATE_ASR_MODEL_DIR",
+            str(BASE_DIR / "models" / f"faster-whisper-{self.model_size}"),
+        ))
         self._load_lock = asyncio.Lock()
+
+    def _model_ref(self) -> str:
+        if Path(self.model_size).exists():
+            return self.model_size
+        if (self.model_dir / "model.bin").exists():
+            return str(self.model_dir)
+
+        try:
+            from huggingface_hub import snapshot_download
+            endpoint = os.environ.get("HF_ENDPOINT") or os.environ.get("VOICEMATE_HF_ENDPOINT")
+            logger.info("Downloading ASR model %s -> %s", self.model_repo, self.model_dir)
+            snapshot_download(
+                self.model_repo,
+                local_dir=str(self.model_dir),
+                endpoint=endpoint,
+                allow_patterns=[
+                    "config.json",
+                    "model.bin",
+                    "tokenizer.json",
+                    "vocabulary.*",
+                    "preprocessor_config.json",
+                ],
+                max_workers=4,
+            )
+            if (self.model_dir / "model.bin").exists():
+                return str(self.model_dir)
+        except Exception as e:
+            logger.error("ASR model download failed: %s", e)
+
+        return self.model_size
 
     async def transcribe(self, audio_path: str) -> str:
         """Transcribe audio file to text using faster-whisper."""
@@ -1051,7 +1090,7 @@ class ASREngine:
                                 self.model = await asyncio.get_event_loop().run_in_executor(
                                     pool,
                                     lambda: WhisperModel(
-                                        self.model_size,
+                                        self._model_ref(),
                                         device=self.device,
                                         compute_type=self.compute_type,
                                     ),
@@ -1068,7 +1107,7 @@ class ASREngine:
                                 self.model = await asyncio.get_event_loop().run_in_executor(
                                     pool,
                                     lambda: WhisperModel(
-                                        self.model_size,
+                                        self._model_ref(),
                                         device="cpu",
                                         compute_type="int8",
                                     ),

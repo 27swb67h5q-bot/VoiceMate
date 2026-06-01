@@ -47,6 +47,10 @@ from typing import Optional, AsyncIterator, AsyncIterable
 
 from dotenv import load_dotenv
 load_dotenv()
+os.environ.setdefault(
+    "HF_ENDPOINT",
+    os.environ.get("VOICEMATE_HF_ENDPOINT", "https://huggingface.co"),
+)
 
 # ── LiveKit imports ──────────────────────────────────────────────────────────
 from livekit import rtc
@@ -216,6 +220,42 @@ class WhisperSTT(stt.STT):
             )
         self._speaker_profile: Optional[tuple[float, ...]] = None
 
+    def _model_ref(self) -> str:
+        if Path(self._local_model_size).exists():
+            return self._local_model_size
+
+        model_repo = os.environ.get("VOICEMATE_ASR_REPO", f"Systran/faster-whisper-{self._local_model_size}")
+        model_dir = Path(os.environ.get(
+            "VOICEMATE_ASR_MODEL_DIR",
+            str(Path(__file__).parent / "models" / f"faster-whisper-{self._local_model_size}"),
+        ))
+        if (model_dir / "model.bin").exists():
+            return str(model_dir)
+
+        try:
+            from huggingface_hub import snapshot_download
+            endpoint = os.environ.get("HF_ENDPOINT") or os.environ.get("VOICEMATE_HF_ENDPOINT")
+            logger.info("Downloading ASR model %s -> %s", model_repo, model_dir)
+            snapshot_download(
+                model_repo,
+                local_dir=str(model_dir),
+                endpoint=endpoint,
+                allow_patterns=[
+                    "config.json",
+                    "model.bin",
+                    "tokenizer.json",
+                    "vocabulary.*",
+                    "preprocessor_config.json",
+                ],
+                max_workers=4,
+            )
+            if (model_dir / "model.bin").exists():
+                return str(model_dir)
+        except Exception as e:
+            logger.error("ASR model download failed: %s", e)
+
+        return self._local_model_size
+
     async def _load_local_model(self):
         from faster_whisper import WhisperModel
         import concurrent.futures
@@ -226,7 +266,7 @@ class WhisperSTT(stt.STT):
             try:
                 self._local_model = await asyncio.get_event_loop().run_in_executor(
                     pool,
-                    lambda: WhisperModel(size, device=device, compute_type=compute_type),
+                    lambda: WhisperModel(self._model_ref(), device=device, compute_type=compute_type),
                 )
                 logger.info("Loaded faster-whisper model: %s (%s/%s)", size, device, compute_type)
             except Exception:
@@ -240,7 +280,7 @@ class WhisperSTT(stt.STT):
                 )
                 self._local_model = await asyncio.get_event_loop().run_in_executor(
                     pool,
-                    lambda: WhisperModel(size, device="cpu", compute_type="int8"),
+                    lambda: WhisperModel(self._model_ref(), device="cpu", compute_type="int8"),
                 )
                 logger.info("Loaded faster-whisper model: %s (cpu/int8 fallback)", size)
 
