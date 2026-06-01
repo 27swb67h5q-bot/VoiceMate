@@ -22,6 +22,7 @@ import asyncio
 import logging
 import time
 import shutil
+from collections import deque
 from pathlib import Path
 from typing import Optional
 import aiohttp
@@ -1209,6 +1210,112 @@ VAD_SPEECH_RATIO = float(os.environ.get("VOICEMATE_VAD_SPEECH_RATIO", "2.8"))
 VAD_FLOOR_MIN = float(os.environ.get("VOICEMATE_VAD_FLOOR_MIN", "45.0"))
 SILENCE_DURATION_MS = int(os.environ.get("VOICEMATE_VAD_SILENCE_MS", "850"))
 MIN_UTTERANCE_MS = int(os.environ.get("VOICEMATE_VAD_MIN_UTTERANCE_MS", "700"))
+VAD_PRE_ROLL_MS = int(os.environ.get("VOICEMATE_VAD_PRE_ROLL_MS", "300"))
+VAD_CONFIRM_FRAMES = int(os.environ.get("VOICEMATE_VAD_CONFIRM_FRAMES", "6"))
+VAD_SHORT_SILENCE_MS = int(os.environ.get("VOICEMATE_VAD_SHORT_SILENCE_MS", "520"))
+VAD_LONG_SILENCE_MS = int(os.environ.get("VOICEMATE_VAD_LONG_SILENCE_MS", "1050"))
+VAD_SHORT_UTTERANCE_MS = int(os.environ.get("VOICEMATE_VAD_SHORT_UTTERANCE_MS", "900"))
+VAD_LONG_UTTERANCE_MS = int(os.environ.get("VOICEMATE_VAD_LONG_UTTERANCE_MS", "2600"))
+BARGE_IN_MIN_UTTERANCE_MS = int(os.environ.get("VOICEMATE_BARGE_IN_MIN_UTTERANCE_MS", "420"))
+
+
+class SpeechTurnDetector:
+    """Detect a complete user turn from PCM16 frames."""
+
+    def __init__(self, vad):
+        self.vad = vad
+        self.frame_size = VAD_FRAME_MS * SAMPLE_RATE // 1000 * BYTES_PER_SAMPLE
+        self.pre_roll_max = max(1, VAD_PRE_ROLL_MS // VAD_FRAME_MS)
+        self.pending = bytearray()
+        self.pre_roll = deque(maxlen=self.pre_roll_max)
+        self.noise_floor = VAD_NOISE_FLOOR_INIT
+        self.reset_turn(clear_preroll=True)
+
+    def reset_turn(self, *, clear_preroll: bool = False):
+        self.active = False
+        self.speech_confirm_frames = 0
+        self.silence_ms = 0.0
+        self.speech_ms = 0.0
+        self.buffer = bytearray()
+        if clear_preroll:
+            self.pre_roll.clear()
+
+    def reset_after_ai_turn(self):
+        self.reset_turn(clear_preroll=True)
+        self.noise_floor = VAD_NOISE_FLOOR_INIT
+
+    def accept(self, pcm_chunk: bytes, *, ai_speaking: bool = False) -> list[dict]:
+        turns = []
+        self.pending.extend(pcm_chunk)
+        while len(self.pending) >= self.frame_size:
+            frame = bytes(self.pending[:self.frame_size])
+            self.pending = self.pending[self.frame_size:]
+            turn = self._push_frame(frame, ai_speaking=ai_speaking)
+            if turn:
+                turns.append(turn)
+        return turns
+
+    def _frame_rms(self, frame: bytes) -> float:
+        samples = struct.unpack_from(f"<{len(frame) // BYTES_PER_SAMPLE}h", frame)
+        return math.sqrt(sum(s * s for s in samples) / len(samples))
+
+    def _is_speech_frame(self, frame: bytes, *, ai_speaking: bool) -> tuple[bool, float]:
+        rms = self._frame_rms(frame)
+        ratio = VAD_SPEECH_RATIO * (1.55 if ai_speaking else 1.0)
+        if rms < self.noise_floor * ratio:
+            return False, rms
+        return self.vad.is_speech(frame, SAMPLE_RATE), rms
+
+    def _end_silence_ms(self) -> int:
+        if self.speech_ms <= VAD_SHORT_UTTERANCE_MS:
+            return VAD_SHORT_SILENCE_MS
+        if self.speech_ms >= VAD_LONG_UTTERANCE_MS:
+            return VAD_LONG_SILENCE_MS
+        return SILENCE_DURATION_MS
+
+    def _push_frame(self, frame: bytes, *, ai_speaking: bool) -> Optional[dict]:
+        is_speech, rms = self._is_speech_frame(frame, ai_speaking=ai_speaking)
+
+        if not self.active:
+            self.pre_roll.append(frame)
+            if not is_speech and rms < self.noise_floor:
+                self.noise_floor = self.noise_floor * VAD_NOISE_FLOOR_DECAY + rms * (1 - VAD_NOISE_FLOOR_DECAY)
+                self.noise_floor = max(self.noise_floor, VAD_FLOOR_MIN)
+
+        if is_speech:
+            if not self.active:
+                confirm_frames_needed = VAD_CONFIRM_FRAMES * (2 if ai_speaking else 1)
+                self.speech_confirm_frames += 1
+                if self.speech_confirm_frames >= confirm_frames_needed:
+                    self.active = True
+                    self.buffer = bytearray(b"".join(self.pre_roll))
+                    self.speech_ms = self.speech_confirm_frames * VAD_FRAME_MS
+                    self.silence_ms = 0.0
+                return None
+
+            self.buffer.extend(frame)
+            self.speech_ms += VAD_FRAME_MS
+            self.silence_ms = 0.0
+            return None
+
+        if not self.active:
+            self.speech_confirm_frames = 0
+            return None
+
+        self.buffer.extend(frame)
+        self.silence_ms += VAD_FRAME_MS
+        if self.silence_ms < self._end_silence_ms():
+            return None
+
+        turn = {
+            "audio": bytes(self.buffer),
+            "speech_ms": self.speech_ms,
+            "silence_ms": self.silence_ms,
+            "total_ms": len(self.buffer) / (SAMPLE_RATE * BYTES_PER_SAMPLE) * 1000,
+            "noise_floor": self.noise_floor,
+        }
+        self.reset_turn(clear_preroll=True)
+        return turn
 
 
 async def _stream_tts_to_websocket(websocket, text: str, voice=None, speed_ratio=None):
@@ -1316,30 +1423,17 @@ async def ws_voice_realtime(websocket: WebSocket):
     voice = None
     speed = None
     
-    # VAD state (WebRTC VAD)
     vad = webrtcvad.Vad(mode=int(os.environ.get("VOICEMATE_WEBRTC_VAD_MODE", "3")))
-    noise_floor = VAD_NOISE_FLOOR_INIT  # adaptive noise floor estimate (decays toward silence RMS)
-    vad_buffer = bytearray()        # PCM buffer to accumulate VAD frame (480 bytes for 30ms @ 16kHz)
-    silence_frames = 0              # consecutive silent frames
-    speech_confirm_frames = 0   # consecutive speech frames needed to start utterance (require >= 4)
-    VAD_CONFIRM_FRAMES = 6          # require 6 consecutive speech frames (180ms) before utterance starts — more robust against noise bursts
-    silence_duration_ms = 0.0       # accumulated silence duration (ms)
-    utterance_active = False        # currently in an utterance
-    utterance_buffer = bytearray()  # PCM data for current utterance
+    turn_detector = SpeechTurnDetector(vad)
     
     # AI speaking state
     ai_speaking = False
     ai_speak_task = None
     
-    # Barge-in guard: require sustained speech before interrupting AI
-    # Prevents AI's own voice (echo from speaker) from causing false barge-in
-    BARGE_IN_CONFIRM_FRAMES = 8          # require 8 frames (240ms) of sustained speech during AI playback
-    BARGE_IN_COOLDOWN_FRAMES = 20        # 600ms cooldown after a rejected barge-in attempt
-    barge_in_speech_frames = 0           # consecutive speech frames detected during AI speaking
-    barge_in_silence_frames = 0          # consecutive silence during barge-in window
-    barge_in_cooldown = 0                # frames remaining in cooldown after rejected barge-in
-    VAD_CONFIRM_FRAMES = int(os.environ.get("VOICEMATE_VAD_CONFIRM_FRAMES", "6"))
-    BARGE_IN_CONFIRM_FRAMES = int(os.environ.get("VOICEMATE_BARGE_IN_CONFIRM_FRAMES", "8"))
+    # Barge-in guard for explicit client-side barge_in messages.
+    barge_in_speech_frames = 0
+    barge_in_silence_frames = 0
+    barge_in_cooldown = 0
     
     # ASR service placeholder (uses external API; for now we simulate with a simple approach)
     # In production, replace with Deepgram / Azure / Aliyun real-time ASR
@@ -1386,19 +1480,24 @@ async def ws_voice_realtime(websocket: WebSocket):
             return True
         return False
     
-    async def process_utterance(utterance_bytes: bytes):
+    async def process_utterance(turn: dict):
         """Process a complete user utterance: ASR -> LLM -> TTS stream."""
         nonlocal ai_speaking, ai_speak_task, barge_in_speech_frames, barge_in_silence_frames, barge_in_cooldown
         
-        utterance_len = len(utterance_bytes)
-        min_bytes = MIN_UTTERANCE_MS * SAMPLE_RATE // 1000 * BYTES_PER_SAMPLE
-        if utterance_len < min_bytes:
-            logger.info(f"Utterance too short: {utterance_len}B < {min_bytes}B minimum [{conv_id}]")
+        speech_ms = float(turn.get("speech_ms", 0.0))
+        if speech_ms < MIN_UTTERANCE_MS:
+            logger.info(f"Utterance too short: speech={speech_ms:.0f}ms < {MIN_UTTERANCE_MS}ms minimum [{conv_id}]")
             return  # too short, ignore
         
         # Send asr_final (client-side ASR will provide the text separately)
         # For now, we just signal that we detected an utterance
-        logger.info(f"Sending asr_final to iOS [{conv_id}]")
+        logger.info(
+            "Sending asr_final to iOS [%s] speech=%.0fms silence=%.0fms total=%.0fms",
+            conv_id,
+            speech_ms,
+            float(turn.get("silence_ms", 0.0)),
+            float(turn.get("total_ms", 0.0)),
+        )
         await websocket.send_json({
             "type": "asr_final",
             "text": "__vad_detected__",
@@ -1445,16 +1544,10 @@ async def ws_voice_realtime(websocket: WebSocket):
         # Guard: if already speaking, cancel previous task first
         if ai_speaking:
             await handle_barge_in()
-            # Small yield to ensure cancellation completes
-
-        if ai_speaking:
-            await handle_barge_in()
-            # Small yield to ensure cancellation completes
             await asyncio.sleep(0.1)
         
         async def _speak_task():
             nonlocal ai_speaking, barge_in_speech_frames, barge_in_silence_frames, barge_in_cooldown
-            nonlocal speech_confirm_frames, noise_floor
             # Reset VAD state and barge-in confirmation state when AI starts a new turn
             barge_in_speech_frames = 0
             barge_in_silence_frames = 0
@@ -1510,10 +1603,7 @@ async def ws_voice_realtime(websocket: WebSocket):
             finally:
                 ai_speaking = False
                 ai_speak_task = None
-                # Reset VAD state for next turn — prevents stale speech_confirm_frames
-                # and elevated noise_floor from affecting subsequent user utterances
-                speech_confirm_frames = 0
-                noise_floor = VAD_NOISE_FLOOR_INIT
+                turn_detector.reset_after_ai_turn()
         
         ai_speaking = True
         ai_speak_task = asyncio.create_task(_speak_task())
@@ -1547,109 +1637,33 @@ async def ws_voice_realtime(websocket: WebSocket):
             
             # ── Binary: raw PCM16 audio from iOS mic ──
             if msg_bytes is not None:
-                pcm_chunk = msg_bytes
-                
-                # Feed into WebRTC VAD buffer
-                vad_buffer.extend(pcm_chunk)
-                
-                # Webrtcvad requires exact 30ms frames (480 bytes at 16kHz 16-bit mono)
-                vad_frame_size = VAD_FRAME_MS * SAMPLE_RATE // 1000 * BYTES_PER_SAMPLE  # 480
-                
-                # Process complete VAD frames from buffer
-                while len(vad_buffer) >= vad_frame_size:
-                    frame = bytes(vad_buffer[:vad_frame_size])
-                    vad_buffer = bytearray(vad_buffer[vad_frame_size:])
-
-                    # ── Adaptive RMS energy pre-filter ──
-                    # Track a noise floor with a leaky integrator (only during silence)
-                    # and treat frames below noise_floor * VAD_SPEECH_RATIO as silence.
-                    # This adapts to fans, HVAC, and other constant background noise
-                    # while still allowing real speech to pass through to webrtcvad.
-                    samples = struct.unpack_from(f"<{vad_frame_size // BYTES_PER_SAMPLE}h", frame)
-                    rms = math.sqrt(sum(s * s for s in samples) / len(samples))
-                    if rms < noise_floor * VAD_SPEECH_RATIO:
-                        is_speech = False
-                    else:
-                        is_speech = vad.is_speech(frame, SAMPLE_RATE)
-                    
-                    # When AI is speaking, raise the energy threshold to reduce echo sensitivity
-                    effective_speech_ratio = VAD_SPEECH_RATIO * 1.5 if ai_speaking else VAD_SPEECH_RATIO
-                    if rms < noise_floor * effective_speech_ratio:
-                        is_speech = False
-
-                    # Update noise floor during confirmed silence
-                    if not utterance_active and not is_speech and rms < noise_floor:
-                        # Leaky integrator: gradually decay toward quieter RMS
-                        noise_floor = noise_floor * VAD_NOISE_FLOOR_DECAY + rms * (1 - VAD_NOISE_FLOOR_DECAY)
-                        noise_floor = max(noise_floor, VAD_FLOOR_MIN)
-
-                    # Compute actual duration of this frame (in ms)
-                    chunk_duration_ms = float(VAD_FRAME_MS)
-                    
-                    if is_speech:
-                        if not utterance_active:
-                            # Not yet in utterance: accumulate confirmation frames
-                            # Require more frames when AI is speaking (less sensitive to echo/noise)
-                            confirm_frames_needed = VAD_CONFIRM_FRAMES * 2 if ai_speaking else VAD_CONFIRM_FRAMES
-                            speech_confirm_frames += 1
-                            if speech_confirm_frames >= confirm_frames_needed:
-                                # Confirmed speech: start utterance
-                                logger.info(f"VAD: speech confirmed ({speech_confirm_frames} frames, ai_speaking={ai_speaking}) [{conv_id}]")
-                                utterance_active = True
-                                # Do NOT accumulate past frames into utterance_buffer;
-                                # those are already discarded. The next frame is the first
-                                # that goes into utterance_buffer.
+                for turn in turn_detector.accept(msg_bytes, ai_speaking=ai_speaking):
+                    logger.info(
+                        "VAD turn complete [%s] speech=%.0fms silence=%.0fms total=%.0fms noise=%.1f",
+                        conv_id,
+                        turn["speech_ms"],
+                        turn["silence_ms"],
+                        turn["total_ms"],
+                        turn["noise_floor"],
+                    )
+                    if ai_speaking:
+                        if turn["speech_ms"] >= BARGE_IN_MIN_UTTERANCE_MS:
+                            logger.info(
+                                "VAD barge-in confirmed [%s] speech=%.0fms",
+                                conv_id,
+                                turn["speech_ms"],
+                            )
+                            await handle_barge_in()
                         else:
-                            # Already in utterance: reset silence counter, accumulate
-                            silence_frames = 0
-                            silence_duration_ms = 0.0
-                            utterance_buffer.extend(frame)
-                    else:
-                        if not utterance_active:
-                            # Silence while confirming — reset counter
-                            if speech_confirm_frames > 0:
-                                speech_confirm_frames = 0
-                        else:
-                            # Silence during utterance: accumulate silence duration
-                            silence_frames += 1
-                            utterance_buffer.extend(frame)
-                            silence_duration_ms += chunk_duration_ms
-                        
-                        # Check if silence is long enough to end utterance
-                        if silence_duration_ms >= SILENCE_DURATION_MS:
-                            # Utterance complete
-                            logger.info(f"VAD: utterance end after {silence_duration_ms:.0f}ms silence, {len(utterance_buffer)}B [{conv_id}]")
-                            if ai_speaking:
-                                # AI was speaking when user utterance ended.
-                                # Use barge-in confirmation window to avoid false triggers
-                                # from AI's own echo through the speaker.
-                                utterance_len = len(utterance_buffer)
-                                # Require minimum speech duration for barge-in (roughly 300ms of PCM data)
-                                min_bargein_bytes = 300 * SAMPLE_RATE // 1000 * BYTES_PER_SAMPLE
-                                if utterance_len >= min_bargein_bytes:
-                                    logger.info(f"VAD barge-in confirmed ({utterance_len}B >= {min_bargein_bytes}B threshold) [{conv_id}]")
-                                    await handle_barge_in()
-                                else:
-                                    logger.info(f"VAD barge-in rejected: utterance too short ({utterance_len}B < {min_bargein_bytes}B, likely AI echo) [{conv_id}]")
-                                    # Don't barge-in, skip processing this utterance entirely
-                                    utterance_active = False
-                                    utterance_buffer = bytearray()
-                                    silence_frames = 0
-                                    silence_duration_ms = 0.0
-                                    speech_confirm_frames = 0
-                                    continue
-                            
-                            # Process the utterance
-                            await process_utterance(bytes(utterance_buffer))
-                            
-                            # Reset
-                            utterance_active = False
-                            utterance_buffer = bytearray()
-                            silence_frames = 0
-                            silence_duration_ms = 0.0
-                            speech_confirm_frames = 0
-                    # else: silence while not in utterance -> discard
-                
+                            logger.info(
+                                "VAD barge-in rejected [%s] speech=%.0fms",
+                                conv_id,
+                                turn["speech_ms"],
+                            )
+                            continue
+
+                    await process_utterance(turn)
+
                 continue
             
             # ── Text: JSON messages ──

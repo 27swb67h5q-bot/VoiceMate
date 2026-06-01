@@ -288,9 +288,9 @@ class WhisperSTT(stt.STT):
                                 beam_size=5,
                                 vad_filter=True,
                                 vad_parameters={
-                                    "min_speech_duration_ms": 450,
-                                    "min_silence_duration_ms": 700,
-                                    "speech_pad_ms": 150,
+                                    "min_speech_duration_ms": int(os.environ.get("VOICEMATE_WHISPER_MIN_SPEECH_MS", "300")),
+                                    "min_silence_duration_ms": int(os.environ.get("VOICEMATE_WHISPER_MIN_SILENCE_MS", "520")),
+                                    "speech_pad_ms": int(os.environ.get("VOICEMATE_WHISPER_SPEECH_PAD_MS", "240")),
                                 },
                             )
                         )
