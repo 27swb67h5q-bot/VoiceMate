@@ -52,10 +52,11 @@ from livekit import rtc
 from livekit.agents.utils import AudioBuffer
 
 from livekit.agents import (
-    JobContext, WorkerOptions, cli,
+    AgentSession, AutoSubscribe, JobContext, WorkerOptions, cli,
     llm, stt, tts, vad, metrics,
 )
 from livekit.agents.voice import Agent, RunContext
+from livekit.plugins import silero
 
 # ── Add project root for imports ─────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent))
@@ -623,6 +624,12 @@ class VoiceMateAgent(Agent):
         super().__init__(
             instructions=instructions,
             stt=self._whisper_stt,
+            vad=silero.VAD.load(
+                min_speech_duration=float(os.environ.get("VOICEMATE_SILERO_MIN_SPEECH_SECONDS", "0.12")),
+                min_silence_duration=float(os.environ.get("VOICEMATE_SILERO_MIN_SILENCE_SECONDS", "0.55")),
+                prefix_padding_duration=float(os.environ.get("VOICEMATE_SILERO_PREFIX_PADDING_SECONDS", "0.30")),
+                activation_threshold=float(os.environ.get("VOICEMATE_SILERO_ACTIVATION_THRESHOLD", "0.45")),
+            ),
             llm=self._deepseek_llm,
             tts=self._edge_tts,
             allow_interruptions=True,       # Barge-in
@@ -652,15 +659,21 @@ class VoiceMateAgent(Agent):
 async def entrypoint(ctx: JobContext):
     """LiveKit agent entry point - called when a job is assigned."""
     logger.info(f"Job assigned: {ctx.job.id}, room: {ctx.room.name}")
-    await ctx.connect()
+    await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
 
     agent = VoiceMateAgent(ctx)
+    session = AgentSession()
 
-    # Agent.start() handles subscribing to participant audio,
+    # AgentSession handles subscribing to participant audio,
     # running VAD → STT → LLM → TTS pipeline with barge-in.
-    agent.start(ctx.room)
+    await session.start(agent, room=ctx.room)
+    if session.room_io.linked_participant:
+        logger.info(
+            "Linked participant for audio: %s",
+            session.room_io.linked_participant.identity,
+        )
 
-    await ctx.primary_session.wait_for_end()
+    await session.wait_for_inactive()
     logger.info(f"Room session ended for {ctx.room.name}")
 
 

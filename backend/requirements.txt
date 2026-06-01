@@ -9,6 +9,7 @@ openai>=1.0,<3
 livekit-api>=1.0,<2
 livekit>=1.0,<2
 livekit-agents>=1.0,<2
+livekit-plugins-silero>=1.0,<2
 webrtcvad-wheels>=2.0.10,<3; platform_system == "Windows"
 webrtcvad>=2.0.10,<3; platform_system != "Windows"
 numpy>=1.26,<3
