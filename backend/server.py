@@ -64,10 +64,12 @@ from pydantic import BaseModel
 import uvicorn
 
 try:
-    from livekit.api import AccessToken, VideoGrants
+    from livekit.api import AccessToken, VideoGrants, RoomConfiguration, RoomAgentDispatch
 except ImportError:
     AccessToken = None
     VideoGrants = None
+    RoomConfiguration = None
+    RoomAgentDispatch = None
 # ── Config ──────────────────────────────────────────────────────────────────
 
 HOST = os.environ.get("VOICEMATE_HOST", "0.0.0.0")
@@ -2012,6 +2014,7 @@ LIVEKIT_API_KEY = os.environ.get("LIVEKIT_API_KEY", "devkey")
 LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "secret")
 LIVEKIT_HOST = os.environ.get("LIVEKIT_HOST", "192.168.10.233")
 LIVEKIT_PORT = int(os.environ.get("LIVEKIT_PORT", "7880"))
+LIVEKIT_AGENT_NAME = os.environ.get("LIVEKIT_AGENT_NAME", "VoiceMate")
 
 ROOM_NAME = "voicemate"
 
@@ -2031,7 +2034,7 @@ async def create_livekit_token(request: Optional[LiveKitTokenRequest] = None):
     Generate a LiveKit access token for joining the VoiceMate room.
     """
     try:
-        if AccessToken is None or VideoGrants is None:
+        if AccessToken is None or VideoGrants is None or RoomConfiguration is None or RoomAgentDispatch is None:
             raise RuntimeError("livekit-api dependency is not installed. Install backend/requirements.txt.")
         logger.info(f"Generating LiveKit token: key={LIVEKIT_API_KEY[:10]}... secret={LIVEKIT_API_SECRET[:10]}...")
         identity = f"voicemate-{uuid.uuid4().hex[:12]}"
@@ -2047,8 +2050,22 @@ async def create_livekit_token(request: Optional[LiveKitTokenRequest] = None):
             can_subscribe=True,
             can_publish_data=True,
         ))
+        room_metadata = json.dumps({
+            "voice": request.voice if request else None,
+            "persona": request.persona if request else None,
+            "speed": request.speed if request else None,
+        }, ensure_ascii=False)
+        token.with_room_config(RoomConfiguration(
+            metadata=room_metadata,
+            agents=[
+                RoomAgentDispatch(
+                    agent_name=LIVEKIT_AGENT_NAME,
+                    metadata=room_metadata,
+                )
+            ],
+        ))
         jwt = token.to_jwt()
-        logger.info(f"LiveKit token generated successfully")
+        logger.info(f"LiveKit token generated successfully; dispatch agent={LIVEKIT_AGENT_NAME}")
 
         return {
             "token": jwt,
