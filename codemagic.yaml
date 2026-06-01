@@ -2,7 +2,7 @@ workflows:
   ios-build:
     name: VoiceMate
     environment:
-      xcode: 15.4
+      xcode: latest
     scripts:
       - name: Install tools and generate Xcode project
         script: |
