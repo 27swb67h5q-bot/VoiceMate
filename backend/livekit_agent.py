@@ -100,6 +100,11 @@ ASR_WAKE_WORDS = tuple(
     for w in os.environ.get("VOICEMATE_ASR_WAKE_WORDS", "小妤,妤妤,VoiceMate").split(",")
     if w.strip()
 )
+SPEAKER_LOCK_ENABLED = os.environ.get("VOICEMATE_SPEAKER_LOCK", "1").lower() in {"1", "true", "yes", "auto"}
+SPEAKER_LOCK_MIN_SECONDS = float(os.environ.get("VOICEMATE_SPEAKER_LOCK_MIN_SECONDS", "1.2"))
+SPEAKER_LOCK_MIN_RMS = float(os.environ.get("VOICEMATE_SPEAKER_LOCK_MIN_RMS", "260"))
+SPEAKER_LOCK_THRESHOLD = float(os.environ.get("VOICEMATE_SPEAKER_LOCK_THRESHOLD", "0.58"))
+SPEAKER_LOCK_LEARN_RATE = float(os.environ.get("VOICEMATE_SPEAKER_LOCK_LEARN_RATE", "0.18"))
 
 
 def _normalize_asr_text(text: str) -> str:
@@ -117,6 +122,49 @@ def _is_noise_text(text: str) -> bool:
     if ASR_REQUIRE_WAKE_WORD:
         return not any(_normalize_asr_text(w) in normalized for w in ASR_WAKE_WORDS)
     return False
+
+
+def _pcm_voice_features(pcm_data: bytes) -> tuple[float, ...]:
+    """Small near-field speaker profile; not biometric, just rejects obvious off-mic speech/noise."""
+    sample_count = len(pcm_data) // 2
+    if sample_count <= 0:
+        return (0.0, 0.0, 0.0, 0.0, 0.0)
+
+    samples = struct.unpack_from(f"<{sample_count}h", pcm_data)
+    rms = math.sqrt(sum(s * s for s in samples) / sample_count)
+    abs_mean = sum(abs(s) for s in samples) / sample_count
+    peak = max(abs(s) for s in samples) or 1
+    zcr = sum(1 for a, b in zip(samples, samples[1:]) if (a < 0 <= b) or (a >= 0 > b)) / max(sample_count - 1, 1)
+
+    frame = 1600  # 100ms at 16kHz
+    frame_rms = []
+    for i in range(0, sample_count - frame + 1, frame):
+        chunk = samples[i:i + frame]
+        frame_rms.append(math.sqrt(sum(s * s for s in chunk) / frame))
+    if not frame_rms:
+        frame_rms = [rms]
+
+    voiced_ratio = sum(1 for v in frame_rms if v >= max(ASR_MIN_RMS, rms * 0.45)) / len(frame_rms)
+    energy_var = math.sqrt(sum((v - rms) ** 2 for v in frame_rms) / len(frame_rms)) / max(rms, 1.0)
+    crest = peak / max(abs_mean, 1.0)
+    return (rms, zcr, voiced_ratio, energy_var, crest)
+
+
+def _speaker_similarity(profile: tuple[float, ...], features: tuple[float, ...]) -> float:
+    if not profile or not features or profile[0] <= 0 or features[0] <= 0:
+        return 0.0
+    rms_ratio = min(profile[0], features[0]) / max(profile[0], features[0])
+    zcr_score = max(0.0, 1.0 - abs(profile[1] - features[1]) / 0.18)
+    voiced_score = max(0.0, 1.0 - abs(profile[2] - features[2]) / 0.45)
+    energy_score = max(0.0, 1.0 - abs(profile[3] - features[3]) / 1.2)
+    crest_score = max(0.0, 1.0 - abs(profile[4] - features[4]) / 7.0)
+    return (
+        rms_ratio * 0.35
+        + zcr_score * 0.20
+        + voiced_score * 0.20
+        + energy_score * 0.15
+        + crest_score * 0.10
+    )
 
 
 # ── Custom STT: Whisper ──────────────────────────────────────────────────────
@@ -138,6 +186,7 @@ class WhisperSTT(stt.STT):
         )
         self._local_model = None
         self._local_model_size = os.environ.get("VOICEMATE_ASR_MODEL", "")
+        self._speaker_profile: Optional[tuple[float, ...]] = None
 
     async def _load_local_model(self):
         from faster_whisper import WhisperModel
@@ -149,7 +198,7 @@ class WhisperSTT(stt.STT):
             )
         logger.info(f"Loaded faster-whisper model: {size}")
 
-    def _audio_buffer_to_wav(self, buffer: AudioBuffer) -> tuple[bytes, float, float]:
+    def _audio_buffer_to_wav(self, buffer: AudioBuffer) -> tuple[bytes, float, float, tuple[float, ...]]:
         """Convert LiveKit AudioBuffer to WAV bytes (downmix to 16kHz 16-bit mono)."""
         import io
         import wave
@@ -183,7 +232,7 @@ class WhisperSTT(stt.STT):
             wf.setsampwidth(2)
             wf.setframerate(16000)  # LiveKit default audio rate for STT
             wf.writeframes(bytes(pcm_data))
-        return buf.getvalue(), duration_seconds, rms
+        return buf.getvalue(), duration_seconds, rms, _pcm_voice_features(bytes(pcm_data))
 
     async def _recognize_impl(
         self,
@@ -199,7 +248,7 @@ class WhisperSTT(stt.STT):
             if self._local_model_size and self._local_model is None:
                 await self._load_local_model()
 
-            wav_bytes, duration_seconds, rms = self._audio_buffer_to_wav(buffer)
+            wav_bytes, duration_seconds, rms, voice_features = self._audio_buffer_to_wav(buffer)
             if duration_seconds < ASR_MIN_AUDIO_SECONDS or rms < ASR_MIN_RMS:
                 logger.info(
                     "STT rejected short/quiet audio: %.2fs rms=%.1f",
@@ -210,6 +259,19 @@ class WhisperSTT(stt.STT):
                     type=stt.SpeechEventType.END_OF_SPEECH,
                     alternatives=[],
                 )
+
+            if SPEAKER_LOCK_ENABLED and self._speaker_profile is not None:
+                similarity = _speaker_similarity(self._speaker_profile, voice_features)
+                if similarity < SPEAKER_LOCK_THRESHOLD:
+                    logger.info(
+                        "STT rejected off-speaker audio: score=%.2f rms=%.1f",
+                        similarity,
+                        rms,
+                    )
+                    return stt.SpeechEvent(
+                        type=stt.SpeechEventType.END_OF_SPEECH,
+                        alternatives=[],
+                    )
 
             if self._local_model:
                 import concurrent.futures
@@ -267,6 +329,17 @@ class WhisperSTT(stt.STT):
                     type=stt.SpeechEventType.END_OF_SPEECH,
                     alternatives=[],
                 )
+
+            if SPEAKER_LOCK_ENABLED and duration_seconds >= SPEAKER_LOCK_MIN_SECONDS and rms >= SPEAKER_LOCK_MIN_RMS:
+                if self._speaker_profile is None:
+                    self._speaker_profile = voice_features
+                    logger.info("Speaker lock enrolled from first clear utterance")
+                else:
+                    alpha = max(0.0, min(SPEAKER_LOCK_LEARN_RATE, 1.0))
+                    self._speaker_profile = tuple(
+                        old * (1.0 - alpha) + new * alpha
+                        for old, new in zip(self._speaker_profile, voice_features)
+                    )
 
             logger.info(f"STT: {text[:80]}")
             return stt.SpeechEvent(
