@@ -73,6 +73,7 @@ from server import (
     detect_emotion,
     prepare_tts_text,
     EMOTION_TTS_PROFILES,
+    resolve_edge_voice,
     MiMoTTS,
     VOICEMATE_TTS_PROVIDER,
     is_semantically_incomplete,
@@ -526,7 +527,7 @@ class EdgeTTSChunkedStream(tts.ChunkedStream):
 
         emotion = detect_emotion(self._text)
         profile = EMOTION_TTS_PROFILES.get(emotion, EMOTION_TTS_PROFILES["gentle"])
-        effective_voice = profile.get("voice", self._tts._voice)
+        effective_voice = resolve_edge_voice(self._tts._voice, emotion)
         effective_rate = profile.get("rate", "+0%")
         effective_pitch = profile.get("pitch", "+0Hz")
 

@@ -83,6 +83,8 @@ DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 
 TTS_VOICE = os.environ.get("VOICEMATE_TTS_VOICE", "zh-CN-XiaoxiaoNeural")  # edge-tts Chinese female
 VOICEMATE_TTS_PROVIDER = os.environ.get("VOICEMATE_TTS_PROVIDER", "auto").strip().lower()
+VOICEMATE_TTS_LOCK_VOICE = os.environ.get("VOICEMATE_TTS_LOCK_VOICE", "1").lower() in {"1", "true", "yes", "on"}
+VOICEMATE_CHATTTS_ENABLED = os.environ.get("VOICEMATE_CHATTTS_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
 
 # Fish Audio for voice cloning
 FISH_AUDIO_API_KEY = os.environ.get("FISH_AUDIO_API_KEY", "")
@@ -288,6 +290,16 @@ EMOTION_TTS_PROFILES = {
     "embarrassed": {"voice": "zh-CN-XiaoyiNeural", "rate": "-5%", "pitch": "+36Hz", "prefix": "啊，"},
     "gentle": {"voice": "zh-CN-XiaoxiaoNeural", "rate": "-4%", "pitch": "+8Hz", "prefix": ""},
 }
+
+
+def resolve_edge_voice(voice: Optional[str], emotion: str = "gentle") -> str:
+    """Keep one AI identity unless voice morphing is explicitly enabled."""
+    if voice and voice.strip():
+        return voice.strip()
+    if not VOICEMATE_TTS_LOCK_VOICE:
+        profile = EMOTION_TTS_PROFILES.get(emotion, EMOTION_TTS_PROFILES["gentle"])
+        return profile.get("voice", TTS_VOICE)
+    return TTS_VOICE
 
 
 def prepare_tts_text(text: str, emotion: str = "gentle") -> str:
@@ -754,10 +766,7 @@ class TTSEngine:
         # Use local variables only — never mutate instance state
         text = prepare_tts_text(text, emotion)
         profile = EMOTION_TTS_PROFILES.get(emotion, EMOTION_TTS_PROFILES["gentle"])
-        effective_voice = voice or self.voice
-        # Only override voice by emotion if caller didn't specify a voice
-        if voice is None:
-            effective_voice = profile.get("voice", effective_voice)
+        effective_voice = resolve_edge_voice(voice, emotion)
         effective_rate = rate or profile.get("rate", self.rate)
         effective_pitch = pitch or profile.get("pitch", self.pitch)
         effective_volume = volume or self.volume
@@ -862,11 +871,13 @@ class TTSEngine:
         if voice is not None:
             return await self._synthesize_edge_tts(text, emotion, speed_ratio, voice, rate, pitch, volume)
 
-        # 1) ChatTTS (local GPU, most natural)
-        try:
-            return await self.chattts.synthesize(text, emotion=emotion, speed_ratio=speed_ratio)
-        except Exception as e:
-            logger.warning(f"ChatTTS failed, falling back: {e}")
+        # 1) ChatTTS can sound natural, but it may sample a different speaker.
+        # Keep it opt-in so the default AI identity stays stable across bubbles.
+        if VOICEMATE_TTS_PROVIDER == "chattts" or VOICEMATE_CHATTTS_ENABLED:
+            try:
+                return await self.chattts.synthesize(text, emotion=emotion, speed_ratio=speed_ratio)
+            except Exception as e:
+                logger.warning(f"ChatTTS failed, falling back: {e}")
 
         # 2) MiMo if configured and auto mode is enabled
         if VOICEMATE_TTS_PROVIDER == "auto" and self.mimo.is_available:
@@ -1558,7 +1569,7 @@ async def _stream_tts_to_websocket(websocket, text: str, voice=None, speed_ratio
     emotion = detect_emotion(text)
     profile = EMOTION_TTS_PROFILES.get(emotion, EMOTION_TTS_PROFILES["gentle"])
     text = prepare_tts_text(text, emotion)
-    effective_voice = voice or profile.get("voice", TTS_VOICE)
+    effective_voice = resolve_edge_voice(voice, emotion)
     
     rate_str = profile.get("rate", "+0%")
     if speed_ratio is not None:
