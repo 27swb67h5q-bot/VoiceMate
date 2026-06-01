@@ -99,8 +99,8 @@ class LiveKitCallService: NSObject, ObservableObject {
             // Use default audio configuration; LiveKit manages VAD, AEC, etc.
             let audioOptions = AudioCaptureOptions(
                 echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: true
+                autoGainControl: true,
+                noiseSuppression: true
             )
             
             // 4. Connect with room options
@@ -117,7 +117,8 @@ class LiveKitCallService: NSObject, ObservableObject {
             )
             
             // 5. Publish microphone
-            try await room.localParticipant!.setMicrophone(enabled: true)
+            localParticipant = room.localParticipant
+            try await room.localParticipant.setMicrophone(enabled: true)
             
             // Mark the call as active
             DispatchQueue.main.async {
