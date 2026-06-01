@@ -70,6 +70,7 @@ from server import (
     strip_markdown,
     naturalize_text,
     detect_emotion,
+    is_semantically_incomplete,
     AUDIO_DIR,
     logger as voicemate_logger,
 )
@@ -407,6 +408,23 @@ class DeepSeekLLMStream(llm.LLMStream):
         messages, _ = self._chat_ctx.to_provider_format(
             "openai", inject_dummy_user_message=False
         )
+        last_user_text = ""
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    last_user_text = content
+                break
+        if is_semantically_incomplete(last_user_text):
+            logger.info("Semantic turn gate: waiting for continuation: %s", last_user_text[:80])
+            yield llm.ChatChunk(
+                id=str(uuid.uuid4()),
+                delta=llm.ChoiceDelta(
+                    role="assistant",
+                    content="嗯，你继续说，我听着。",
+                ),
+            )
+            return
 
         # Inject time context (matching server.py)
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M %A")

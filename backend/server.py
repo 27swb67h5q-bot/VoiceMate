@@ -1217,6 +1217,68 @@ VAD_LONG_SILENCE_MS = int(os.environ.get("VOICEMATE_VAD_LONG_SILENCE_MS", "1050"
 VAD_SHORT_UTTERANCE_MS = int(os.environ.get("VOICEMATE_VAD_SHORT_UTTERANCE_MS", "900"))
 VAD_LONG_UTTERANCE_MS = int(os.environ.get("VOICEMATE_VAD_LONG_UTTERANCE_MS", "2600"))
 BARGE_IN_MIN_UTTERANCE_MS = int(os.environ.get("VOICEMATE_BARGE_IN_MIN_UTTERANCE_MS", "420"))
+SEMANTIC_TURN_ENABLED = os.environ.get("VOICEMATE_SEMANTIC_TURN_ENABLED", "1").lower() in {"1", "true", "yes"}
+SEMANTIC_TURN_DELAY_MS = int(os.environ.get("VOICEMATE_SEMANTIC_TURN_DELAY_MS", "900"))
+SEMANTIC_TURN_MIN_CHARS = int(os.environ.get("VOICEMATE_SEMANTIC_TURN_MIN_CHARS", "3"))
+
+
+SEMANTIC_CONTINUE_WORDS = (
+    "如果", "假如", "要是", "因为", "但是", "然后", "所以", "比如", "就是",
+    "关于", "还有", "那个", "这个", "我想", "我想问", "我想问你", "我在想",
+    "你觉得", "你说", "能不能", "可不可以", "是不是", "等一下", "先别",
+    "if", "because", "but", "and then", "so", "for example", "i want to ask",
+    "do you think",
+)
+SEMANTIC_FINAL_PUNCT = "。！？!?~～"
+
+
+def _semantic_compact_text(text: str) -> str:
+    return re.sub(r"[\s，,。！？!?、；;：:~～…]+", "", (text or "").strip().lower())
+
+
+def is_semantically_incomplete(text: str) -> bool:
+    if not SEMANTIC_TURN_ENABLED:
+        return False
+    stripped = (text or "").strip()
+    compact = _semantic_compact_text(stripped)
+    if len(compact) < SEMANTIC_TURN_MIN_CHARS:
+        return False
+    if stripped[-1:] in SEMANTIC_FINAL_PUNCT:
+        return False
+    if any(compact.endswith(_semantic_compact_text(word)) for word in SEMANTIC_CONTINUE_WORDS):
+        return True
+    if any(compact.startswith(_semantic_compact_text(word)) for word in ("如果", "假如", "要是", "if")):
+        return True
+    if re.search(r"(我想|我想问|我在想|你觉得|如果|假如|因为|但是|然后|比如)$", compact):
+        return True
+    return False
+
+
+class SemanticTurnGate:
+    """Delay obviously unfinished ASR text before calling the LLM."""
+
+    def __init__(self):
+        self.pending_task: Optional[asyncio.Task] = None
+
+    def cancel(self):
+        if self.pending_task and not self.pending_task.done():
+            self.pending_task.cancel()
+        self.pending_task = None
+
+    async def submit(self, text: str, callback):
+        self.cancel()
+        if not is_semantically_incomplete(text):
+            await callback(text)
+            return
+
+        async def _delayed():
+            try:
+                await asyncio.sleep(SEMANTIC_TURN_DELAY_MS / 1000)
+                await callback(text)
+            except asyncio.CancelledError:
+                pass
+
+        self.pending_task = asyncio.create_task(_delayed())
 
 
 class SpeechTurnDetector:
@@ -1425,6 +1487,7 @@ async def ws_voice_realtime(websocket: WebSocket):
     
     vad = webrtcvad.Vad(mode=int(os.environ.get("VOICEMATE_WEBRTC_VAD_MODE", "3")))
     turn_detector = SpeechTurnDetector(vad)
+    semantic_gate = SemanticTurnGate()
     
     # AI speaking state
     ai_speaking = False
@@ -1459,6 +1522,10 @@ async def ws_voice_realtime(websocket: WebSocket):
             except Exception:
                 pass
             logger.info(f"AI speech interrupted by barge-in [{conv_id}]")
+
+    async def handle_user_text(text: str):
+        logger.info(f"User text [{conv_id}]: {text[:80]}")
+        await ai_speak(text)
     
     async def handle_barge_in_attempt():
         """Check if barge-in should proceed, using confirmation window.
@@ -1732,11 +1799,7 @@ async def ws_voice_realtime(websocket: WebSocket):
                 if "conversation_id" in data and data["conversation_id"]:
                     conv_id = data["conversation_id"]
                 
-                logger.info(f"User text [{conv_id}]: {text[:80]}")
-                
-                # ai_speak() handles barge-in internally now
-                # Start AI speak task (LLM + TTS stream)
-                await ai_speak(text)
+                await semantic_gate.submit(text, handle_user_text)
                 continue
     
     except WebSocketDisconnect:
@@ -1749,6 +1812,7 @@ async def ws_voice_realtime(websocket: WebSocket):
             pass
     finally:
         # Cleanup
+        semantic_gate.cancel()
         if ai_speak_task and not ai_speak_task.done():
             ai_speak_task.cancel()
         try:
