@@ -88,6 +88,10 @@ VOICEMATE_TTS_PROVIDER = os.environ.get("VOICEMATE_TTS_PROVIDER", "edge").strip(
 VOICEMATE_TTS_LOCK_VOICE = os.environ.get("VOICEMATE_TTS_LOCK_VOICE", "1").lower() in {"1", "true", "yes", "on"}
 VOICEMATE_CHATTTS_ENABLED = os.environ.get("VOICEMATE_CHATTTS_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
 VOICEMATE_TTS_ALLOW_CLIENT_EDGE_VOICE = os.environ.get("VOICEMATE_TTS_ALLOW_CLIENT_EDGE_VOICE", "0").lower() in {"1", "true", "yes", "on"}
+VOICEMATE_ASR_MODEL = os.environ.get("VOICEMATE_ASR_MODEL", "base").strip() or "base"
+VOICEMATE_ASR_DEVICE = os.environ.get("VOICEMATE_ASR_DEVICE", "cpu").strip() or "cpu"
+VOICEMATE_ASR_COMPUTE_TYPE = os.environ.get("VOICEMATE_ASR_COMPUTE_TYPE", "int8").strip() or "int8"
+VOICEMATE_ASR_BEAM_SIZE = int(os.environ.get("VOICEMATE_WHISPER_BEAM_SIZE", "3"))
 
 # Fish Audio for voice cloning
 FISH_AUDIO_API_KEY = os.environ.get("FISH_AUDIO_API_KEY", "")
@@ -286,12 +290,12 @@ def detect_emotion(text: str) -> str:
 
 
 EMOTION_TTS_PROFILES = {
-    "cheerful": {"voice": "zh-CN-XiaoyiNeural", "rate": "+14%", "pitch": "+42Hz", "prefix": "嘿嘿，"},
-    "affectionate": {"voice": "zh-CN-XiaoxiaoNeural", "rate": "-3%", "pitch": "+24Hz", "prefix": "嗯，"},
-    "sad": {"voice": "zh-CN-XiaoxiaoNeural", "rate": "-18%", "pitch": "-28Hz", "prefix": "唉，"},
-    "angry": {"voice": "zh-CN-XiaoyiNeural", "rate": "+6%", "pitch": "-20Hz", "prefix": "哼，"},
-    "embarrassed": {"voice": "zh-CN-XiaoyiNeural", "rate": "-5%", "pitch": "+36Hz", "prefix": "啊，"},
-    "gentle": {"voice": "zh-CN-XiaoxiaoNeural", "rate": "-4%", "pitch": "+8Hz", "prefix": ""},
+    "cheerful": {"voice": "zh-CN-XiaoyiNeural", "rate": "+10%", "pitch": "+12Hz", "prefix": "嘿嘿，"},
+    "affectionate": {"voice": "zh-CN-XiaoxiaoNeural", "rate": "-3%", "pitch": "+8Hz", "prefix": "嗯，"},
+    "sad": {"voice": "zh-CN-XiaoxiaoNeural", "rate": "-14%", "pitch": "-10Hz", "prefix": "唉，"},
+    "angry": {"voice": "zh-CN-XiaoyiNeural", "rate": "+4%", "pitch": "-8Hz", "prefix": "哼，"},
+    "embarrassed": {"voice": "zh-CN-XiaoyiNeural", "rate": "-5%", "pitch": "+10Hz", "prefix": "啊，"},
+    "gentle": {"voice": "zh-CN-XiaoxiaoNeural", "rate": "-4%", "pitch": "+4Hz", "prefix": ""},
 }
 
 
@@ -786,6 +790,13 @@ class TTSEngine:
             volume=effective_volume,
             pitch=effective_pitch,
         )
+        logger.info(
+            "TTS voice locked: provider=edge voice=%s emotion=%s rate=%s pitch=%s",
+            effective_voice,
+            emotion,
+            effective_rate,
+            effective_pitch,
+        )
 
         start = time.time()
         try:
@@ -1014,7 +1025,10 @@ async def get_audio(audio_id: str):
 class ASREngine:
     def __init__(self):
         self.model = None
-        self.model_size = os.environ.get("VOICEMATE_ASR_MODEL", "base")
+        self.model_size = VOICEMATE_ASR_MODEL
+        self.device = VOICEMATE_ASR_DEVICE
+        self.compute_type = VOICEMATE_ASR_COMPUTE_TYPE
+        self._load_lock = asyncio.Lock()
 
     async def transcribe(self, audio_path: str) -> str:
         """Transcribe audio file to text using faster-whisper."""
@@ -1022,22 +1036,65 @@ class ASREngine:
             from faster_whisper import WhisperModel
 
             if self.model is None:
-                logger.info(f"Loading faster-whisper model '{self.model_size}'...")
-                # Run model loading in a thread to avoid blocking
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    self.model = await asyncio.get_event_loop().run_in_executor(
-                        pool, lambda: WhisperModel(self.model_size, device="cpu", compute_type="int8")
-                    )
-                logger.info("Whisper model loaded")
+                async with self._load_lock:
+                    if self.model is None:
+                        logger.info(
+                            "Loading faster-whisper model '%s' (%s/%s)...",
+                            self.model_size,
+                            self.device,
+                            self.compute_type,
+                        )
+                        # Run model loading in a thread to avoid blocking
+                        import concurrent.futures
+                        with concurrent.futures.ThreadPoolExecutor() as pool:
+                            try:
+                                self.model = await asyncio.get_event_loop().run_in_executor(
+                                    pool,
+                                    lambda: WhisperModel(
+                                        self.model_size,
+                                        device=self.device,
+                                        compute_type=self.compute_type,
+                                    ),
+                                )
+                            except Exception:
+                                if self.device.lower() == "cpu":
+                                    raise
+                                logger.warning(
+                                    "Whisper load failed on %s/%s; falling back to cpu/int8",
+                                    self.device,
+                                    self.compute_type,
+                                    exc_info=True,
+                                )
+                                self.model = await asyncio.get_event_loop().run_in_executor(
+                                    pool,
+                                    lambda: WhisperModel(
+                                        self.model_size,
+                                        device="cpu",
+                                        compute_type="int8",
+                                    ),
+                                )
+                        logger.info("Whisper model loaded")
 
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor() as pool:
                 segments, info = await asyncio.get_event_loop().run_in_executor(
-                    pool, lambda: self.model.transcribe(audio_path, language="zh", beam_size=5)
+                    pool,
+                    lambda: self.model.transcribe(
+                        audio_path,
+                        language="zh",
+                        beam_size=VOICEMATE_ASR_BEAM_SIZE,
+                        temperature=0.0,
+                        condition_on_previous_text=False,
+                        without_timestamps=True,
+                        vad_filter=False,
+                    ),
                 )
-                result = "".join(seg.text for seg in segments)
-                logger.info(f"ASR: {result[:80]}")
+                segment_list = list(segments)
+                result = "".join(seg.text for seg in segment_list).strip()
+                avg_no_speech = 0.0
+                if segment_list:
+                    avg_no_speech = sum(getattr(seg, "no_speech_prob", 0.0) for seg in segment_list) / len(segment_list)
+                logger.info("ASR: %s (segments=%d no_speech=%.2f)", result[:80], len(segment_list), avg_no_speech)
                 return result.strip()
         except Exception as e:
             logger.error(f"ASR failed: {e}")
@@ -1057,6 +1114,9 @@ class ASREngine:
                 except Exception as e2:
                     logger.error(f"OpenAI ASR fallback also failed: {e2}")
             return ""
+
+
+asr_engine = ASREngine()
 
 
 # ── Uploaded Audio → ASR → Chat → TTS ──────────────────────────────────────
@@ -1090,7 +1150,6 @@ async def voice_chat(
     logger.info(f"Audio saved: {input_path}, converted: {wav_path}")
 
     # Transcribe
-    asr_engine = ASREngine()
     text = await asr_engine.transcribe(wav_path)
 
     if not text:
@@ -1396,6 +1455,7 @@ VAD_LONG_SILENCE_MS = int(os.environ.get("VOICEMATE_VAD_LONG_SILENCE_MS", "1050"
 VAD_SHORT_UTTERANCE_MS = int(os.environ.get("VOICEMATE_VAD_SHORT_UTTERANCE_MS", "900"))
 VAD_LONG_UTTERANCE_MS = int(os.environ.get("VOICEMATE_VAD_LONG_UTTERANCE_MS", "2600"))
 BARGE_IN_MIN_UTTERANCE_MS = int(os.environ.get("VOICEMATE_BARGE_IN_MIN_UTTERANCE_MS", "420"))
+BARGE_IN_CONFIRM_FRAMES = int(os.environ.get("VOICEMATE_BARGE_IN_CONFIRM_FRAMES", "8"))
 SEMANTIC_TURN_ENABLED = os.environ.get("VOICEMATE_SEMANTIC_TURN_ENABLED", "1").lower() in {"1", "true", "yes"}
 SEMANTIC_TURN_DELAY_MS = int(os.environ.get("VOICEMATE_SEMANTIC_TURN_DELAY_MS", "900"))
 SEMANTIC_TURN_MIN_CHARS = int(os.environ.get("VOICEMATE_SEMANTIC_TURN_MIN_CHARS", "3"))
@@ -1649,12 +1709,14 @@ async def ws_voice_realtime(websocket: WebSocket):
     Flow:
       1. Client streams PCM16 16kHz chunks as binary frames
       2. Server performs VAD (energy-based silence detection)
-      3. When user utterance complete, send asr_final, call LLM + TTS
-      4. Server streams TTS audio chunks back as binary frames
-      5. If client sends barge_in during playback, server stops TTS immediately
-      6. Client microphone is ALWAYS open; barge-in is detected on client side
+      3. When user utterance completes, server runs local faster-whisper ASR
+      4. Server sends asr_final, then calls LLM + TTS
+      5. Server streams TTS audio chunks back as binary frames
+      6. If client sends barge_in during playback, server stops TTS immediately
+      7. Client microphone is ALWAYS open; barge-in is detected on client side
     """
     await websocket.accept()
+    await websocket.send_json({"type": "connected", "mode": "server_asr"})
     if webrtcvad is None:
         await websocket.send_json({
             "type": "error",
@@ -1681,9 +1743,6 @@ async def ws_voice_realtime(websocket: WebSocket):
     barge_in_silence_frames = 0
     barge_in_cooldown = 0
     
-    # ASR service placeholder (uses external API; for now we simulate with a simple approach)
-    # In production, replace with Deepgram / Azure / Aliyun real-time ASR
-    
     logger.info(f"Full-duplex voice call started: {conv_id}, persona={persona}, voice={voice}")
     
     async def handle_barge_in():
@@ -1709,6 +1768,19 @@ async def ws_voice_realtime(websocket: WebSocket):
     async def handle_user_text(text: str):
         logger.info(f"User text [{conv_id}]: {text[:80]}")
         await ai_speak(text)
+
+    def _write_pcm16_wav(pcm_data: bytes) -> str:
+        """Persist a detected PCM16/16k/mono utterance for faster-whisper."""
+        import wave
+
+        audio_id = uuid.uuid4().hex[:8]
+        wav_path = str(AUDIO_DIR / f"rt_asr_{audio_id}.wav")
+        with wave.open(wav_path, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(SAMPLE_RATE)
+            wf.writeframes(pcm_data)
+        return wav_path
     
     async def handle_barge_in_attempt():
         """Check if barge-in should proceed, using confirmation window.
@@ -1739,25 +1811,42 @@ async def ws_voice_realtime(websocket: WebSocket):
             logger.info(f"Utterance too short: speech={speech_ms:.0f}ms < {MIN_UTTERANCE_MS}ms minimum [{conv_id}]")
             return  # too short, ignore
         
-        # Send asr_final (client-side ASR will provide the text separately)
-        # For now, we just signal that we detected an utterance
+        audio = turn.get("audio", b"")
+        if not audio:
+            logger.info(f"Utterance has no audio buffer [{conv_id}]")
+            return
+
+        wav_path = _write_pcm16_wav(audio)
+        try:
+            text = (await asr_engine.transcribe(wav_path)).strip()
+        finally:
+            try:
+                os.remove(wav_path)
+            except OSError:
+                pass
+
+        if not text or _is_filler_text(text):
+            logger.info(f"Realtime ASR skipped empty/filler text: {text!r} [{conv_id}]")
+            try:
+                await websocket.send_json({"type": "turn_skipped", "conversation_id": conv_id, "reason": "asr_empty"})
+            except Exception:
+                pass
+            return
+
         logger.info(
-            "Sending asr_final to iOS [%s] speech=%.0fms silence=%.0fms total=%.0fms",
+            "Realtime ASR final [%s] text=%s speech=%.0fms silence=%.0fms total=%.0fms",
             conv_id,
+            text[:80],
             speech_ms,
             float(turn.get("silence_ms", 0.0)),
             float(turn.get("total_ms", 0.0)),
         )
         await websocket.send_json({
             "type": "asr_final",
-            "text": "__vad_detected__",
+            "text": text,
             "conversation_id": conv_id,
         })
-        
-        # Note: In full production, send audio to server-side ASR (Deepgram/Azure).
-        # For now we rely on client-side ASR sending a "text" message.
-        # The VAD here is used to trigger the flow; actual transcribed text comes from client.
-        # See the "text" command handler below.
+        await semantic_gate.submit(text, handle_user_text)
     
     def _is_filler_text(text: str) -> bool:
         """Check if text is just filler/thinking noise (e.g., "嗯", "um", "啊")."""
@@ -1848,6 +1937,7 @@ async def ws_voice_realtime(websocket: WebSocket):
                 logger.error(f"AI speak task error: {e}")
                 try:
                     await websocket.send_json({"type": "error", "message": "AI回复失败"})
+                    await websocket.send_json({"type": "turn_done", "conversation_id": conv_id, "error": True})
                 except Exception:
                     pass
             finally:

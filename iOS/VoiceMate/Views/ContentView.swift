@@ -111,9 +111,7 @@ struct ContentView: View {
             }
             .onChange(of: inputMode) { mode in
                 if mode == .text {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        isTextFieldFocused = true
-                    }
+                    focusTextInput(after: 0.1)
                 }
             }
         }
@@ -309,9 +307,7 @@ struct ContentView: View {
                 .contentShape(Rectangle())
                 .onTapGesture {
                     inputMode = .text
-                    DispatchQueue.main.async {
-                        isTextFieldFocused = true
-                    }
+                    focusTextInput()
                 }
             
             if !textInput.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -322,6 +318,11 @@ struct ContentView: View {
                 }
                 .disabled(voiceService.isProcessing)
             }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            inputMode = .text
+            focusTextInput()
         }
     }
     
@@ -348,9 +349,7 @@ struct ContentView: View {
                 // Tap → switch to text input mode (show keyboard)
                 withAnimation(.easeInOut(duration: 0.2)) {
                     inputMode = .text
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                        isTextFieldFocused = true
-                    }
+                    focusTextInput(after: 0.25)
                 }
             }
             .simultaneousGesture(
@@ -449,13 +448,22 @@ struct ContentView: View {
     }
     
     // MARK: - Send Actions
+
+    private func focusTextInput(after delay: TimeInterval = 0.02) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            isTextFieldFocused = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
+                isTextFieldFocused = true
+            }
+        }
+    }
     
     private func sendTextMessage() {
         let text = textInput.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         textInput = ""
         // Keep keyboard focused so the user can type the next message immediately.
-        isTextFieldFocused = true
+        focusTextInput()
         
         let user = ChatMessage(id: UUID(), isUser: true, text: text, audioURL: nil, timestamp: Date())
         messages.append(user)

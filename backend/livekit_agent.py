@@ -40,6 +40,7 @@ import time
 import struct
 import math
 import re
+import array
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, AsyncIterator, AsyncIterable
@@ -97,6 +98,15 @@ LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "")
 LIVEKIT_AGENT_NAME = os.environ.get("LIVEKIT_AGENT_NAME", "VoiceMate")
 LLM_MAX_TOKENS = int(os.environ.get("VOICEMATE_LLM_MAX_TOKENS", "140"))
 REALTIME_TTS_PROVIDER = os.environ.get("VOICEMATE_REALTIME_TTS_PROVIDER", VOICEMATE_TTS_PROVIDER).strip().lower()
+ASR_MODEL = (os.environ.get("VOICEMATE_ASR_MODEL", "base").strip() or "base")
+ASR_DEVICE = (os.environ.get("VOICEMATE_ASR_DEVICE", "cpu").strip() or "cpu")
+ASR_COMPUTE_TYPE = (os.environ.get("VOICEMATE_ASR_COMPUTE_TYPE", "int8").strip() or "int8")
+ASR_API_KEY = os.environ.get("VOICE_TOOLS_OPENAI_KEY") or os.environ.get("OPENAI_API_KEY", "")
+ASR_API_BASE_URL = (
+    os.environ.get("VOICE_TOOLS_OPENAI_BASE_URL")
+    or os.environ.get("OPENAI_BASE_URL")
+    or "https://api.openai.com/v1"
+)
 
 # Noise/side-speech rejection. Tune these from .env if the room is very quiet/loud.
 ASR_MIN_AUDIO_SECONDS = float(os.environ.get("VOICEMATE_ASR_MIN_AUDIO_SECONDS", "0.75"))
@@ -133,7 +143,7 @@ def _is_noise_text(text: str) -> bool:
     return False
 
 
-def _pcm_voice_features(pcm_data: bytes) -> tuple[float, ...]:
+def _pcm_voice_features(pcm_data: bytes, sample_rate: int = 16000) -> tuple[float, ...]:
     """Small near-field speaker profile; not biometric, just rejects obvious off-mic speech/noise."""
     sample_count = len(pcm_data) // 2
     if sample_count <= 0:
@@ -145,7 +155,7 @@ def _pcm_voice_features(pcm_data: bytes) -> tuple[float, ...]:
     peak = max(abs(s) for s in samples) or 1
     zcr = sum(1 for a, b in zip(samples, samples[1:]) if (a < 0 <= b) or (a >= 0 > b)) / max(sample_count - 1, 1)
 
-    frame = 1600  # 100ms at 16kHz
+    frame = max(int(sample_rate * 0.1), 1)
     frame_rms = []
     for i in range(0, sample_count - frame + 1, frame):
         chunk = samples[i:i + frame]
@@ -188,27 +198,86 @@ class WhisperSTT(stt.STT):
                 interim_results=False,
             )
         )
-        from openai import AsyncOpenAI
-        self._client = AsyncOpenAI(
-            api_key=DEEPSEEK_API_KEY,
-            base_url=DEEPSEEK_BASE_URL,
-        )
+        self._local_model_size = ASR_MODEL
+        self._use_local_model = self._local_model_size.lower() not in {
+            "api",
+            "openai",
+            "remote",
+        }
         self._local_model = None
-        self._local_model_size = os.environ.get("VOICEMATE_ASR_MODEL", "")
+        self._client = None
+        if not self._use_local_model:
+            from openai import AsyncOpenAI
+            if not ASR_API_KEY:
+                logger.warning("Whisper API mode requested, but VOICE_TOOLS_OPENAI_KEY/OPENAI_API_KEY is not set.")
+            self._client = AsyncOpenAI(
+                api_key=ASR_API_KEY or "missing",
+                base_url=ASR_API_BASE_URL,
+            )
         self._speaker_profile: Optional[tuple[float, ...]] = None
 
     async def _load_local_model(self):
         from faster_whisper import WhisperModel
         import concurrent.futures
         size = self._local_model_size or "base"
+        device = ASR_DEVICE
+        compute_type = ASR_COMPUTE_TYPE
         with concurrent.futures.ThreadPoolExecutor() as pool:
-            self._local_model = await asyncio.get_event_loop().run_in_executor(
-                pool, lambda: WhisperModel(size, device="cpu", compute_type="int8")
-            )
-        logger.info(f"Loaded faster-whisper model: {size}")
+            try:
+                self._local_model = await asyncio.get_event_loop().run_in_executor(
+                    pool,
+                    lambda: WhisperModel(size, device=device, compute_type=compute_type),
+                )
+                logger.info("Loaded faster-whisper model: %s (%s/%s)", size, device, compute_type)
+            except Exception:
+                if device.lower() == "cpu":
+                    raise
+                logger.warning(
+                    "Failed to load faster-whisper on %s/%s; falling back to cpu/int8",
+                    device,
+                    compute_type,
+                    exc_info=True,
+                )
+                self._local_model = await asyncio.get_event_loop().run_in_executor(
+                    pool,
+                    lambda: WhisperModel(size, device="cpu", compute_type="int8"),
+                )
+                logger.info("Loaded faster-whisper model: %s (cpu/int8 fallback)", size)
 
-    def _audio_buffer_to_wav(self, buffer: AudioBuffer) -> tuple[bytes, float, float, tuple[float, ...]]:
-        """Convert LiveKit AudioBuffer to WAV bytes (downmix to 16kHz 16-bit mono)."""
+    @staticmethod
+    def _frame_to_mono_pcm(frame: rtc.AudioFrame) -> tuple[bytes, int, int]:
+        raw = frame.data
+        if hasattr(raw, "tobytes"):
+            raw = raw.tobytes()
+        elif isinstance(raw, memoryview):
+            raw = bytes(raw)
+
+        sample_rate = int(getattr(frame, "sample_rate", 0) or 16000)
+        channels = max(int(getattr(frame, "num_channels", 0) or 1), 1)
+        frame_width = channels * 2
+        if not raw or len(raw) < 2:
+            return b"", sample_rate, channels
+        if len(raw) % frame_width:
+            raw = raw[: len(raw) - (len(raw) % frame_width)]
+
+        samples = array.array("h")
+        samples.frombytes(raw)
+        if sys.byteorder != "little":
+            samples.byteswap()
+
+        if channels == 1:
+            mono = samples
+        else:
+            mono = array.array("h")
+            for i in range(0, len(samples), channels):
+                mono.append(int(sum(samples[i:i + channels]) / channels))
+
+        if sys.byteorder != "little":
+            mono.byteswap()
+        return mono.tobytes(), sample_rate, channels
+
+    def _audio_buffer_to_wav(self, buffer: AudioBuffer) -> tuple[bytes, float, float, tuple[float, ...], int, int, int]:
+        """Convert LiveKit AudioBuffer to WAV bytes using the frame's real format."""
         import io
         import wave
 
@@ -218,30 +287,60 @@ class WhisperSTT(stt.STT):
         else:
             frames = list(buffer)
 
-        pcm_data = bytearray()
+        pcm_chunks: list[bytes] = []
+        target_sample_rate: Optional[int] = None
+        max_channels = 1
         for frame in frames:
-            raw = frame.data
-            if hasattr(raw, 'tobytes'):
-                raw = raw.tobytes()
-            elif isinstance(raw, memoryview):
-                raw = bytes(raw)
-            pcm_data.extend(raw)
+            mono_pcm, sample_rate, channels = self._frame_to_mono_pcm(frame)
+            if not mono_pcm:
+                continue
+            if target_sample_rate is None:
+                target_sample_rate = sample_rate
+            elif sample_rate != target_sample_rate:
+                try:
+                    import audioop
+                    mono_pcm, _ = audioop.ratecv(
+                        mono_pcm,
+                        2,
+                        1,
+                        sample_rate,
+                        target_sample_rate,
+                        None,
+                    )
+                except Exception:
+                    logger.warning(
+                        "STT received mixed sample rates (%s -> %s) and could not resample",
+                        sample_rate,
+                        target_sample_rate,
+                    )
+            max_channels = max(max_channels, channels)
+            pcm_chunks.append(mono_pcm)
 
+        sample_rate = target_sample_rate or 16000
+        pcm_data = b"".join(pcm_chunks)
         sample_count = len(pcm_data) // 2
         if sample_count:
-            samples = struct.unpack_from(f"<{sample_count}h", bytes(pcm_data))
+            samples = struct.unpack_from(f"<{sample_count}h", pcm_data)
             rms = math.sqrt(sum(s * s for s in samples) / sample_count)
         else:
             rms = 0.0
-        duration_seconds = sample_count / 16000
+        duration_seconds = sample_count / sample_rate if sample_rate else 0.0
 
         buf = io.BytesIO()
         with wave.open(buf, "wb") as wf:
             wf.setnchannels(1)
             wf.setsampwidth(2)
-            wf.setframerate(16000)  # LiveKit default audio rate for STT
-            wf.writeframes(bytes(pcm_data))
-        return buf.getvalue(), duration_seconds, rms, _pcm_voice_features(bytes(pcm_data))
+            wf.setframerate(sample_rate)
+            wf.writeframes(pcm_data)
+        return (
+            buf.getvalue(),
+            duration_seconds,
+            rms,
+            _pcm_voice_features(pcm_data, sample_rate),
+            sample_rate,
+            max_channels,
+            len(frames),
+        )
 
     async def _recognize_impl(
         self,
@@ -254,10 +353,16 @@ class WhisperSTT(stt.STT):
         lang = language or "zh"
 
         try:
-            if self._local_model_size and self._local_model is None:
-                await self._load_local_model()
-
-            wav_bytes, duration_seconds, rms, voice_features = self._audio_buffer_to_wav(buffer)
+            wav_bytes, duration_seconds, rms, voice_features, sample_rate, channels, frame_count = self._audio_buffer_to_wav(buffer)
+            logger.info(
+                "STT buffer: frames=%d sr=%d channels<=%d duration=%.2fs rms=%.1f model=%s",
+                frame_count,
+                sample_rate,
+                channels,
+                duration_seconds,
+                rms,
+                self._local_model_size if self._use_local_model else "api",
+            )
             if duration_seconds < ASR_MIN_AUDIO_SECONDS or rms < ASR_MIN_RMS:
                 logger.info(
                     "STT rejected short/quiet audio: %.2fs rms=%.1f",
@@ -282,6 +387,9 @@ class WhisperSTT(stt.STT):
                         alternatives=[],
                     )
 
+            if self._use_local_model and self._local_model is None:
+                await self._load_local_model()
+
             if self._local_model:
                 import concurrent.futures
                 temp_path = str(AUDIO_DIR / f"asr_{uuid.uuid4().hex[:8]}.wav")
@@ -293,7 +401,10 @@ class WhisperSTT(stt.STT):
                             pool, lambda: self._local_model.transcribe(
                                 temp_path,
                                 language=lang,
-                                beam_size=5,
+                                beam_size=int(os.environ.get("VOICEMATE_WHISPER_BEAM_SIZE", "3")),
+                                temperature=0.0,
+                                condition_on_previous_text=False,
+                                without_timestamps=True,
                                 vad_filter=True,
                                 vad_parameters={
                                     "min_speech_duration_ms": int(os.environ.get("VOICEMATE_WHISPER_MIN_SPEECH_MS", "300")),
@@ -321,6 +432,8 @@ class WhisperSTT(stt.STT):
             else:
                 # API-based Whisper
                 try:
+                    if self._client is None:
+                        raise RuntimeError("Whisper API client is not configured")
                     transcript = await self._client.audio.transcriptions.create(
                         model="whisper-1",
                         file=("audio.wav", wav_bytes, "audio/wav"),
@@ -790,6 +903,9 @@ def main():
         WorkerOptions(
             entrypoint_fnc=entrypoint,
             agent_name=LIVEKIT_AGENT_NAME,
+            ws_url=LIVEKIT_URL,
+            api_key=LIVEKIT_API_KEY,
+            api_secret=LIVEKIT_API_SECRET,
         )
     )
 
