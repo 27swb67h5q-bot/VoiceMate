@@ -109,6 +109,13 @@ struct ContentView: View {
             .onChange(of: proactiveEnabled) { _ in
                 startProactiveTimer()
             }
+            .onChange(of: inputMode) { mode in
+                if mode == .text {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        isTextFieldFocused = true
+                    }
+                }
+            }
         }
         .preferredColorScheme(.dark)
         // Recording overlay (WeChat style)
@@ -299,6 +306,13 @@ struct ContentView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 20))
                 .submitLabel(.send)
                 .onSubmit(sendTextMessage)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    inputMode = .text
+                    DispatchQueue.main.async {
+                        isTextFieldFocused = true
+                    }
+                }
             
             if !textInput.trimmingCharacters(in: .whitespaces).isEmpty {
                 Button(action: sendTextMessage) {

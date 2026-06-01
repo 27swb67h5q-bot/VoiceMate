@@ -15,7 +15,7 @@ struct RealtimeCallView: View {
     let onTranscript: ([(isUser: Bool, text: String)]) -> Void
     let onTurnCompleted: (_ isUser: Bool, _ text: String) -> Void
     
-    @StateObject private var callService: LiveKitCallService
+    @StateObject private var callService: RealtimeCallService
     
     @State private var pulseScale: CGFloat = 1.0
     @State private var pulseOpacity: Double = 0.6
@@ -29,7 +29,7 @@ struct RealtimeCallView: View {
         self.onTranscript = onTranscript
         self.onTurnCompleted = onTurnCompleted
         
-        let service = LiveKitCallService(
+        let service = RealtimeCallService(
             serverHost: serverHost,
             serverPort: serverPort,
             voice: voice,

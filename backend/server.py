@@ -84,9 +84,10 @@ DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.co
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 
 TTS_VOICE = os.environ.get("VOICEMATE_TTS_VOICE", "zh-CN-XiaoxiaoNeural")  # edge-tts Chinese female
-VOICEMATE_TTS_PROVIDER = os.environ.get("VOICEMATE_TTS_PROVIDER", "auto").strip().lower()
+VOICEMATE_TTS_PROVIDER = os.environ.get("VOICEMATE_TTS_PROVIDER", "edge").strip().lower()
 VOICEMATE_TTS_LOCK_VOICE = os.environ.get("VOICEMATE_TTS_LOCK_VOICE", "1").lower() in {"1", "true", "yes", "on"}
 VOICEMATE_CHATTTS_ENABLED = os.environ.get("VOICEMATE_CHATTTS_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
+VOICEMATE_TTS_ALLOW_CLIENT_EDGE_VOICE = os.environ.get("VOICEMATE_TTS_ALLOW_CLIENT_EDGE_VOICE", "0").lower() in {"1", "true", "yes", "on"}
 
 # Fish Audio for voice cloning
 FISH_AUDIO_API_KEY = os.environ.get("FISH_AUDIO_API_KEY", "")
@@ -296,7 +297,7 @@ EMOTION_TTS_PROFILES = {
 
 def resolve_edge_voice(voice: Optional[str], emotion: str = "gentle") -> str:
     """Keep one AI identity unless voice morphing is explicitly enabled."""
-    if voice and voice.strip():
+    if VOICEMATE_TTS_ALLOW_CLIENT_EDGE_VOICE and voice and voice.strip():
         return voice.strip()
     if not VOICEMATE_TTS_LOCK_VOICE:
         profile = EMOTION_TTS_PROFILES.get(emotion, EMOTION_TTS_PROFILES["gentle"])
@@ -843,8 +844,8 @@ class TTSEngine:
         
         Priority:
           - voice starts with "fish_" → Fish Audio cloned voice
-          - voice is explicitly specified → edge_tts directly
-          - If no voice specified → ChatTTS (local GPU) → Volcengine (cloud API) → edge_tts (default voice)
+          - ordinary Edge voices from the client are ignored by default so the AI identity stays stable
+          - cloud/local providers are opt-in through VOICEMATE_TTS_PROVIDER
 
         """
         # Cloned voice via Fish Audio
@@ -869,10 +870,6 @@ class TTSEngine:
             except Exception as e:
                 logger.warning(f"MiMo TTS failed, falling back: {e}")
         
-        # If user explicitly chose a voice (non-clone), use edge_tts directly
-        if voice is not None:
-            return await self._synthesize_edge_tts(text, emotion, speed_ratio, voice, rate, pitch, volume)
-
         # 1) ChatTTS can sound natural, but it may sample a different speaker.
         # Keep it opt-in so the default AI identity stays stable across bubbles.
         if VOICEMATE_TTS_PROVIDER == "chattts" or VOICEMATE_CHATTTS_ENABLED:
@@ -881,15 +878,15 @@ class TTSEngine:
             except Exception as e:
                 logger.warning(f"ChatTTS failed, falling back: {e}")
 
-        # 2) MiMo if configured and auto mode is enabled
-        if VOICEMATE_TTS_PROVIDER == "auto" and self.mimo.is_available:
+        # 2) MiMo if explicitly configured.
+        if VOICEMATE_TTS_PROVIDER == "mimo" and self.mimo.is_available:
             try:
                 return await self.mimo.synthesize(text, emotion=emotion, speed_ratio=speed_ratio)
             except Exception as e:
                 logger.warning(f"MiMo TTS failed, falling back: {e}")
 
-        # 3) Volcengine if configured
-        if self.volc.appid and self.volc.token:
+        # 3) Volcengine if explicitly configured.
+        if VOICEMATE_TTS_PROVIDER in {"volc", "volcengine", "doubao"} and self.volc.appid and self.volc.token:
             try:
                 path = await self.volc.synthesize(text, emotion=emotion, speed_ratio=speed_ratio)
                 duration_ms = max(int((len(text) / 5) * 1000), 1000)
