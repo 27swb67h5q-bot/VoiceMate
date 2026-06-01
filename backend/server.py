@@ -82,10 +82,17 @@ DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.co
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 
 TTS_VOICE = os.environ.get("VOICEMATE_TTS_VOICE", "zh-CN-XiaoxiaoNeural")  # edge-tts Chinese female
+VOICEMATE_TTS_PROVIDER = os.environ.get("VOICEMATE_TTS_PROVIDER", "auto").strip().lower()
 
 # Fish Audio for voice cloning
 FISH_AUDIO_API_KEY = os.environ.get("FISH_AUDIO_API_KEY", "")
 FISH_AUDIO_BASE_URL = "https://api.fish.audio/v1"
+MIMO_API_KEY = os.environ.get("MIMO_API_KEY", "")
+MIMO_BASE_URL = os.environ.get("MIMO_BASE_URL", "https://api.xiaomimimo.com/v1")
+MIMO_TTS_MODEL = os.environ.get("MIMO_TTS_MODEL", "mimo-v2.5-tts")
+MIMO_TTS_VOICE = os.environ.get("MIMO_TTS_VOICE", "\u51b0\u7cd6")
+MIMO_TTS_CONTEXT = os.environ.get("MIMO_TTS_CONTEXT", "")
+MIMO_VOICE_SAMPLE = os.environ.get("MIMO_VOICE_SAMPLE", "")
 TTS_RATE = os.environ.get("VOICEMATE_TTS_RATE", "+0%")
 TTS_VOLUME = os.environ.get("VOICEMATE_TTS_VOLUME", "+0%")
 CLONE_DIR = Path(os.environ.get("VOICEMATE_CLONE_DIR", str(PROJECT_ROOT / "cloned_voices")))
@@ -590,6 +597,130 @@ class FishAudioTTS:
             logger.info(f"Fish Audio TTS (voice {voice_id[:12]}...) -> {output_path} ({duration_ms}ms)")
             return output_path, duration_ms
 
+
+class MiMoTTS:
+    """Xiaomi MiMo V2.5 TTS through the OpenAI-compatible API."""
+
+    PRESET_VOICES = {
+        "\u51b0\u7cd6",  # Bingtang
+        "\u8309\u8389",  # Moli
+        "\u82cf\u6253",  # Suda
+        "\u767d\u6866",  # Baihua
+        "Mia",
+        "Chloe",
+        "Milo",
+        "Dean",
+    }
+
+    EMOTION_CONTEXT = {
+        "cheerful": "\u7528\u8f7b\u5feb\u4e0a\u626c\u7684\u8bed\u6c14\uff0c\u8bed\u901f\u7a0d\u5feb\uff0c\u5e26\u660e\u4eae\u7684\u5f00\u5fc3\u611f\u3002",
+        "affectionate": "\u7528\u6e29\u67d4\u4eb2\u8fd1\u7684\u8bed\u6c14\uff0c\u8bed\u901f\u7a0d\u6162\uff0c\u5e26\u4e00\u70b9\u8f7b\u58f0\u548c\u4f9d\u604b\u611f\u3002",
+        "sad": "\u7528\u4f4e\u843d\u3001\u8f7b\u58f0\u7684\u8bed\u6c14\uff0c\u505c\u987f\u7a0d\u591a\uff0c\u4e0d\u8981\u5938\u5f20\u54ed\u8154\u3002",
+        "angry": "\u7528\u514b\u5236\u7684\u4e0d\u6ee1\u8bed\u6c14\uff0c\u91cd\u97f3\u66f4\u660e\u786e\uff0c\u4f46\u4e0d\u8981\u558a\u53eb\u3002",
+        "embarrassed": "\u7528\u5bb3\u7f9e\u3001\u5c0f\u58f0\u3001\u7565\u5e26\u72b9\u8c6b\u7684\u8bed\u6c14\uff0c\u8bed\u5c3e\u653e\u8f7b\u3002",
+        "gentle": "\u7528\u81ea\u7136\u3001\u6e29\u67d4\u3001\u50cf\u771f\u4eba\u804a\u5929\u7684\u8bed\u6c14\uff0c\u6709\u8f7b\u5fae\u505c\u987f\u3002",
+    }
+
+    def __init__(self):
+        self.api_key = MIMO_API_KEY
+        self.base_url = MIMO_BASE_URL
+        self.model = MIMO_TTS_MODEL
+        self.voice = MIMO_TTS_VOICE
+        self.context = MIMO_TTS_CONTEXT
+        self.voice_sample = MIMO_VOICE_SAMPLE
+
+    @property
+    def is_available(self) -> bool:
+        return bool(self.api_key)
+
+    def _parse_voice(self, voice: Optional[str]) -> Optional[str]:
+        if not voice:
+            return None
+        for prefix in ("mimo:", "mimo_"):
+            if voice.startswith(prefix):
+                return voice[len(prefix):]
+        if voice in self.PRESET_VOICES:
+            return voice
+        return None
+
+    def _voice_sample_data_url(self) -> str:
+        if not self.voice_sample:
+            raise RuntimeError("MIMO_VOICE_SAMPLE is required for MiMo voiceclone model")
+        path = Path(self.voice_sample)
+        if not path.exists():
+            raise RuntimeError(f"MiMo voice sample not found: {path}")
+        suffix = path.suffix.lower()
+        mime_type = {".mp3": "audio/mpeg", ".wav": "audio/wav"}.get(suffix)
+        if not mime_type:
+            raise RuntimeError("MiMo voice sample must be mp3 or wav")
+        data = path.read_bytes()
+        if len(data) > 10 * 1024 * 1024:
+            raise RuntimeError("MiMo voice sample must be <= 10 MB")
+        import base64
+        return f"data:{mime_type};base64,{base64.b64encode(data).decode('utf-8')}"
+
+    def _build_context(self, emotion: str) -> str:
+        parts = []
+        if self.context:
+            parts.append(self.context.strip())
+        parts.append(self.EMOTION_CONTEXT.get(emotion, self.EMOTION_CONTEXT["gentle"]))
+        return "\n".join(p for p in parts if p)
+
+    async def synthesize(
+        self,
+        text: str,
+        emotion: str = "gentle",
+        speed_ratio: Optional[float] = None,
+        voice: Optional[str] = None,
+    ) -> tuple[str, int]:
+        if not self.is_available:
+            raise RuntimeError("MIMO_API_KEY is not configured")
+
+        from openai import AsyncOpenAI
+        import base64
+
+        clean_text = prepare_tts_text(text, emotion)
+        context = self._build_context(emotion)
+        if speed_ratio is not None:
+            if speed_ratio < 0.9:
+                context += "\n\u8bed\u901f\u653e\u6162\uff0c\u7559\u51fa\u66f4\u81ea\u7136\u7684\u505c\u987f\u3002"
+            elif speed_ratio > 1.1:
+                context += "\n\u8bed\u901f\u7a0d\u5feb\uff0c\u8bed\u6c14\u66f4\u8f7b\u5feb\u8fde\u8d2f\u3002"
+
+        messages = []
+        if context:
+            messages.append({"role": "user", "content": context})
+        messages.append({"role": "assistant", "content": clean_text})
+
+        audio: dict[str, str] = {"format": "wav"}
+        selected_voice = self._parse_voice(voice) or self.voice
+        if self.model == "mimo-v2.5-tts":
+            audio["voice"] = selected_voice
+        elif self.model == "mimo-v2.5-tts-voiceclone":
+            audio["voice"] = self._voice_sample_data_url()
+
+        client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
+        completion = await client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            audio=audio,
+        )
+        message = completion.choices[0].message
+        audio_data = getattr(getattr(message, "audio", None), "data", None)
+        if not audio_data:
+            raise RuntimeError("MiMo TTS returned no audio data")
+
+        raw_audio = base64.b64decode(audio_data)
+        audio_id = str(uuid.uuid4())[:8]
+        output_path = str(AUDIO_DIR / f"mimo_{audio_id}.wav")
+        with open(output_path, "wb") as f:
+            f.write(raw_audio)
+
+        duration_ms = max(int((len(clean_text) / 5) * 1000), 1000)
+        logger.info(f"MiMo TTS [{self.model}/{selected_voice}/{emotion}] -> {output_path} ({duration_ms}ms)")
+        return output_path, duration_ms
+
+
 class TTSEngine:
 
 
@@ -601,6 +732,7 @@ class TTSEngine:
         self.chattts = ChatTTSEngine()
         self.volc = VolcengineTTS()
         self.fish = FishAudioTTS()
+        self.mimo = MiMoTTS()
 
     async def _synthesize_edge_tts(
         self,
@@ -711,6 +843,20 @@ class TTSEngine:
                 return await self.fish.synthesize(text, fish_voice_id, speed_ratio or 1.0)
             except Exception as e:
                 logger.warning(f"Fish Audio TTS failed (voice={fish_voice_id[:12]}...), falling back: {e}")
+
+        wants_mimo = (
+            VOICEMATE_TTS_PROVIDER == "mimo"
+            or (voice is not None and (
+                voice.startswith("mimo:")
+                or voice.startswith("mimo_")
+                or voice in self.mimo.PRESET_VOICES
+            ))
+        )
+        if wants_mimo:
+            try:
+                return await self.mimo.synthesize(text, emotion=emotion, speed_ratio=speed_ratio, voice=voice)
+            except Exception as e:
+                logger.warning(f"MiMo TTS failed, falling back: {e}")
         
         # If user explicitly chose a voice (non-clone), use edge_tts directly
         if voice is not None:
@@ -722,7 +868,14 @@ class TTSEngine:
         except Exception as e:
             logger.warning(f"ChatTTS failed, falling back: {e}")
 
-        # 2) Volcengine if configured
+        # 2) MiMo if configured and auto mode is enabled
+        if VOICEMATE_TTS_PROVIDER == "auto" and self.mimo.is_available:
+            try:
+                return await self.mimo.synthesize(text, emotion=emotion, speed_ratio=speed_ratio)
+            except Exception as e:
+                logger.warning(f"MiMo TTS failed, falling back: {e}")
+
+        # 3) Volcengine if configured
         if self.volc.appid and self.volc.token:
             try:
                 path = await self.volc.synthesize(text, emotion=emotion, speed_ratio=speed_ratio)
@@ -732,7 +885,7 @@ class TTSEngine:
             except Exception as e:
                 logger.warning(f"Volcengine TTS failed, falling back to edge-tts: {e}")
 
-        # 3) edge_tts fallback
+        # 4) edge_tts fallback
         return await self._synthesize_edge_tts(text, emotion, speed_ratio, voice, rate, pitch, volume)
 
 

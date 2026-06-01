@@ -73,6 +73,8 @@ from server import (
     detect_emotion,
     prepare_tts_text,
     EMOTION_TTS_PROFILES,
+    MiMoTTS,
+    VOICEMATE_TTS_PROVIDER,
     is_semantically_incomplete,
     AUDIO_DIR,
     logger as voicemate_logger,
@@ -93,6 +95,7 @@ LIVEKIT_API_KEY = os.environ.get("LIVEKIT_API_KEY", "")
 LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "")
 LIVEKIT_AGENT_NAME = os.environ.get("LIVEKIT_AGENT_NAME", "VoiceMate")
 LLM_MAX_TOKENS = int(os.environ.get("VOICEMATE_LLM_MAX_TOKENS", "140"))
+REALTIME_TTS_PROVIDER = os.environ.get("VOICEMATE_REALTIME_TTS_PROVIDER", VOICEMATE_TTS_PROVIDER).strip().lower()
 
 # Noise/side-speech rejection. Tune these from .env if the room is very quiet/loud.
 ASR_MIN_AUDIO_SECONDS = float(os.environ.get("VOICEMATE_ASR_MIN_AUDIO_SECONDS", "0.75"))
@@ -589,6 +592,85 @@ class EdgeTTSChunkedStream(tts.ChunkedStream):
 
 # ── VoiceMate Agent ─────────────────────────────────────────────────────────
 
+class MiMoLiveTTS(tts.TTS):
+    """LiveKit TTS adapter for Xiaomi MiMo V2.5 TTS."""
+
+    def __init__(self):
+        super().__init__(
+            capabilities=tts.TTSCapabilities(streaming=False),
+            sample_rate=24000,
+            num_channels=1,
+        )
+        self._mimo = MiMoTTS()
+
+    @property
+    def provider(self) -> str:
+        return "xiaomi-mimo"
+
+    @property
+    def is_available(self) -> bool:
+        return self._mimo.is_available
+
+    def synthesize(self, text: str, **kwargs) -> tts.ChunkedStream:
+        return MiMoLiveTTSChunkedStream(self, text)
+
+
+class MiMoLiveTTSChunkedStream(tts.ChunkedStream):
+    """Generates MiMo WAV, decodes to PCM, then pushes 20 ms LiveKit frames."""
+
+    def __init__(self, mimo_tts_obj: MiMoLiveTTS, text: str):
+        from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS
+        super().__init__(
+            tts=mimo_tts_obj,
+            input_text=text,
+            conn_options=DEFAULT_API_CONNECT_OPTIONS,
+        )
+        self._tts = mimo_tts_obj
+        self._text = text
+
+    async def _run(self, emitter: tts.AudioEmitter) -> None:
+        emotion = detect_emotion(self._text)
+        text = strip_markdown(self._text)
+
+        try:
+            audio_path, _duration_ms = await self._tts._mimo.synthesize(text, emotion=emotion)
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-i", audio_path,
+                "-f", "s16le", "-acodec", "pcm_s16le",
+                "-ar", "24000", "-ac", "1",
+                "pipe:1",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            pcm_data, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                logger.error(f"ffmpeg decode failed: {stderr.decode(errors='replace')[:200]}")
+                return
+            if not pcm_data or len(pcm_data) < 960:
+                return
+
+            emitter.initialize(
+                request_id=str(uuid.uuid4()),
+                sample_rate=24000,
+                num_channels=1,
+                mime_type="audio/pcm",
+            )
+
+            frame_size = 1920
+            offset = 0
+            while offset < len(pcm_data):
+                end = min(offset + frame_size, len(pcm_data))
+                chunk = pcm_data[offset:end]
+                if len(chunk) < frame_size:
+                    chunk += b'\x00' * (frame_size - len(chunk))
+                emitter.push(chunk)
+                offset = end
+
+            emitter.flush()
+        except Exception as e:
+            logger.error(f"MiMo TTS synthesis error: {e}")
+
+
 class VoiceMateAgent(Agent):
     """VoiceMate Voice AI Agent for LiveKit.
 
@@ -615,10 +697,17 @@ class VoiceMateAgent(Agent):
         self._whisper_stt = WhisperSTT()
         self._deepseek_llm = DeepSeekLLM()
         self._edge_tts = EdgeTTS()
+        self._mimo_tts = MiMoLiveTTS()
+        self._active_tts = self._edge_tts
+        if REALTIME_TTS_PROVIDER == "mimo":
+            if self._mimo_tts.is_available:
+                self._active_tts = self._mimo_tts
+            else:
+                logger.warning("VOICEMATE_REALTIME_TTS_PROVIDER=mimo but MIMO_API_KEY is not configured; using edge-tts")
 
         logger.info(
             f"VoiceMateAgent init (persona={self._persona}, "
-            f"voice={self._voice}) [{self._conv_id}]"
+            f"voice={self._voice}, tts={self._active_tts.provider}) [{self._conv_id}]"
         )
 
         super().__init__(
@@ -631,7 +720,7 @@ class VoiceMateAgent(Agent):
                 activation_threshold=float(os.environ.get("VOICEMATE_SILERO_ACTIVATION_THRESHOLD", "0.45")),
             ),
             llm=self._deepseek_llm,
-            tts=self._edge_tts,
+            tts=self._active_tts,
             allow_interruptions=True,       # Barge-in
             min_endpointing_delay=float(os.environ.get("VOICEMATE_MIN_ENDPOINTING_DELAY", "0.55")),
             max_endpointing_delay=float(os.environ.get("VOICEMATE_MAX_ENDPOINTING_DELAY", "1.25")),
