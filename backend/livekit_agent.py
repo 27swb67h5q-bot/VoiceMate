@@ -70,6 +70,8 @@ from server import (
     strip_markdown,
     naturalize_text,
     detect_emotion,
+    prepare_tts_text,
+    EMOTION_TTS_PROFILES,
     is_semantically_incomplete,
     AUDIO_DIR,
     logger as voicemate_logger,
@@ -519,30 +521,13 @@ class EdgeTTSChunkedStream(tts.ChunkedStream):
         import edge_tts
 
         emotion = detect_emotion(self._text)
-        emotion_voices = {
-            "cheerful": "zh-CN-XiaoyiNeural",
-            "affectionate": "zh-CN-XiaoxiaoNeural",
-            "sad": "zh-CN-XiaoxiaoNeural",
-            "angry": "zh-CN-XiaoxiaoNeural",
-            "embarrassed": "zh-CN-XiaoyiNeural",
-            "gentle": "zh-CN-XiaoxiaoNeural",
-        }
-        emotion_params = {
-            "cheerful":      {"rate": "+0%", "pitch": "+30Hz"},
-            "affectionate":  {"rate": "+0%", "pitch": "+15Hz"},
-            "sad":           {"rate": "+0%", "pitch": "-20Hz"},
-            "angry":         {"rate": "+0%", "pitch": "-15Hz"},
-            "embarrassed":   {"rate": "+0%", "pitch": "+20Hz"},
-            "gentle":        {"rate": "+0%", "pitch": "+0Hz"},
-        }
-
-        effective_voice = emotion_voices.get(emotion, self._tts._voice)
-        params = emotion_params.get(emotion, {})
-        effective_rate = params.get("rate", "+0%")
-        effective_pitch = params.get("pitch", "+0Hz")
+        profile = EMOTION_TTS_PROFILES.get(emotion, EMOTION_TTS_PROFILES["gentle"])
+        effective_voice = profile.get("voice", self._tts._voice)
+        effective_rate = profile.get("rate", "+0%")
+        effective_pitch = profile.get("pitch", "+0Hz")
 
         text = strip_markdown(self._text)
-        text = naturalize_text(text)
+        text = prepare_tts_text(text, emotion)
 
         try:
             communicate = edge_tts.Communicate(

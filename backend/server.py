@@ -259,11 +259,11 @@ class DeepSeekClient:
 # ── Emotion Detection ──────────────────────────────────────────────────────
 
 EMOTION_KEYWORDS = {
-    "affectionate": ["想你", "抱抱", "亲亲", "宝贝", "想你了", "撒娇", "人家", "嘛~", "啦~"],
-    "cheerful": ["哈哈", "开心", "太好", "真棒", "耶", "棒", "好开心", "真好", "嘻嘻"],
-    "sad": ["唉", "难过", "伤心", "不开心", "委屈", "哭", "难受", "呜呜", "失落"],
-    "angry": ["哼", "气", "生气", "烦", "讨厌", "气死", "真是的"],
-    "embarrassed": ["害羞", "不好意思", "脸红", "好害羞", "讨厌啦"],
+    "affectionate": ["想你", "抱抱", "亲亲", "宝贝", "想你了", "撒娇", "人家", "喜欢你", "陪我", "贴贴"],
+    "cheerful": ["哈哈", "开心", "太好", "真棒", "耶", "棒", "好开心", "真好", "嘻嘻", "厉害", "不错"],
+    "sad": ["唉", "难过", "伤心", "不开心", "委屈", "哭", "难受", "呜呜", "失落", "累了", "疼"],
+    "angry": ["哼", "气", "生气", "烦", "讨厌", "气死", "真是的", "不理你", "过分"],
+    "embarrassed": ["害羞", "不好意思", "脸红", "好害羞", "讨厌啦", "别这样", "羞"],
 }
 
 def detect_emotion(text: str) -> str:
@@ -271,6 +271,39 @@ def detect_emotion(text: str) -> str:
         if any(kw in text for kw in keywords):
             return emotion
     return "gentle"
+
+
+EMOTION_TTS_PROFILES = {
+    "cheerful": {"voice": "zh-CN-XiaoyiNeural", "rate": "+14%", "pitch": "+42Hz", "prefix": "嘿嘿，"},
+    "affectionate": {"voice": "zh-CN-XiaoxiaoNeural", "rate": "-3%", "pitch": "+24Hz", "prefix": "嗯，"},
+    "sad": {"voice": "zh-CN-XiaoxiaoNeural", "rate": "-18%", "pitch": "-28Hz", "prefix": "唉，"},
+    "angry": {"voice": "zh-CN-XiaoyiNeural", "rate": "+6%", "pitch": "-20Hz", "prefix": "哼，"},
+    "embarrassed": {"voice": "zh-CN-XiaoyiNeural", "rate": "-5%", "pitch": "+36Hz", "prefix": "啊，"},
+    "gentle": {"voice": "zh-CN-XiaoxiaoNeural", "rate": "-4%", "pitch": "+8Hz", "prefix": ""},
+}
+
+
+def prepare_tts_text(text: str, emotion: str = "gentle") -> str:
+    """Make synthesized speech less flat with light emotion cues and pauses."""
+    clean = naturalize_text(strip_markdown(text or ""))
+    clean = re.sub(r"\s+", " ", clean).strip()
+    if not clean:
+        return clean
+
+    profile = EMOTION_TTS_PROFILES.get(emotion, EMOTION_TTS_PROFILES["gentle"])
+    prefix = profile.get("prefix", "")
+    if prefix and not clean.startswith(prefix) and len(clean) > 8:
+        clean = prefix + clean
+
+    clean = re.sub(r"([。！？!?])", r"\1 ", clean)
+    clean = re.sub(r"([，、；;])", r"\1 ", clean)
+    clean = re.sub(r"\s+", " ", clean).strip()
+    clean = re.sub(r"([，。！？、；])\s+", r"\1", clean)
+
+    if len(clean) > 34 and "，" not in clean[:34]:
+        pos = min(max(len(clean) // 2, 12), 26)
+        clean = clean[:pos] + "，" + clean[pos:]
+    return clean
 
 
 
@@ -586,32 +619,15 @@ class TTSEngine:
         raw_path = str(AUDIO_DIR / f"raw_{audio_id}.mp3")
         output_path = str(AUDIO_DIR / f"{audio_id}.mp3")
 
-        # Emotion-to-voice mapping — override voice temporarily per emotion
-        EMOTION_VOICES = {
-            "cheerful": "zh-CN-XiaoyiNeural",
-            "affectionate": "zh-CN-XiaoxiaoNeural",
-            "sad": "zh-CN-XiaoxiaoNeural",
-            "angry": "zh-CN-XiaoxiaoNeural",
-            "embarrassed": "zh-CN-XiaoyiNeural",
-            "gentle": "zh-CN-XiaoxiaoNeural",
-        }
-        EMOTION_TTS_PARAMS = {
-            "cheerful":      {"rate": "+0%", "pitch": "+30Hz"},
-            "affectionate":  {"rate": "+0%", "pitch": "+15Hz"},
-            "sad":           {"rate": "+0%", "pitch": "-20Hz"},
-            "angry":         {"rate": "+0%", "pitch": "-15Hz"},
-            "embarrassed":   {"rate": "+0%", "pitch": "+20Hz"},
-            "gentle":        {"rate": "+0%", "pitch": "+0Hz"},
-        }
-
         # Use local variables only — never mutate instance state
+        text = prepare_tts_text(text, emotion)
+        profile = EMOTION_TTS_PROFILES.get(emotion, EMOTION_TTS_PROFILES["gentle"])
         effective_voice = voice or self.voice
-        emotion_params = EMOTION_TTS_PARAMS.get(emotion, {})
         # Only override voice by emotion if caller didn't specify a voice
         if voice is None:
-            effective_voice = EMOTION_VOICES.get(emotion, effective_voice)
-        effective_rate = rate or emotion_params.get("rate", self.rate)
-        effective_pitch = pitch or emotion_params.get("pitch", self.pitch)
+            effective_voice = profile.get("voice", effective_voice)
+        effective_rate = rate or profile.get("rate", self.rate)
+        effective_pitch = pitch or profile.get("pitch", self.pitch)
         effective_volume = volume or self.volume
 
         # speed_ratio override: if App provides speed, use it over emotion rate
@@ -1386,13 +1402,17 @@ async def _stream_tts_to_websocket(websocket, text: str, voice=None, speed_ratio
     """
     import edge_tts
     
-    effective_voice = voice or TTS_VOICE
+    emotion = detect_emotion(text)
+    profile = EMOTION_TTS_PROFILES.get(emotion, EMOTION_TTS_PROFILES["gentle"])
+    text = prepare_tts_text(text, emotion)
+    effective_voice = voice or profile.get("voice", TTS_VOICE)
     
-    rate_str = "+0%"
+    rate_str = profile.get("rate", "+0%")
     if speed_ratio is not None:
         rate_str = f"{int((speed_ratio - 1) * 100):+d}%"
+    pitch_str = profile.get("pitch", "+0Hz")
     
-    communicate = edge_tts.Communicate(text, effective_voice, rate=rate_str)
+    communicate = edge_tts.Communicate(text, effective_voice, rate=rate_str, pitch=pitch_str)
     
     mp3_data = b""
     async for chunk in communicate.stream():
