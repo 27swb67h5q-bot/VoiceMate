@@ -9,7 +9,8 @@ openai>=1.0,<3
 livekit-api>=1.0,<2
 livekit>=1.0,<2
 livekit-agents>=1.0,<2
-webrtcvad>=2.0.10,<3
+webrtcvad-wheels>=2.0.10,<3; platform_system == "Windows"
+webrtcvad>=2.0.10,<3; platform_system != "Windows"
 numpy>=1.26,<3
 soundfile>=0.12,<1
 faster-whisper>=1.0,<2

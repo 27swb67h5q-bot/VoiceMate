@@ -52,7 +52,7 @@ from livekit import rtc
 from livekit.agents.utils import AudioBuffer
 
 from livekit.agents import (
-    AutoSubscribe, JobContext, WorkerOptions, cli,
+    JobContext, WorkerOptions, cli,
     llm, stt, tts, vad, metrics,
 )
 from livekit.agents.voice import Agent, RunContext
@@ -686,7 +686,6 @@ def main():
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,
-            auto_subscribe=AutoSubscribe.AUDIO_ONLY,
             agent_name=LIVEKIT_AGENT_NAME,
         )
     )
