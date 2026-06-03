@@ -1,210 +1,99 @@
 import SwiftUI
 
-/// Simplified real-time voice call view using LiveKit.
-/// Clean phone-call style: avatar, status, duration, hang up button.
-/// LiveKit handles all audio capture/playback/VAD — we just manage UI.
 struct RealtimeCallView: View {
-    @Environment(\.dismiss) var dismiss
-    
-    // Configuration from parent
-    let serverHost: String
-    let serverPort: String
-    let voice: String
-    let persona: String
-    let speed: Double
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var service: LiveKitCallService
+
     let onTranscript: ([(isUser: Bool, text: String)]) -> Void
     let onTurnCompleted: (_ isUser: Bool, _ text: String) -> Void
-    
-    @StateObject private var callService: RealtimeCallService
-    
-    @State private var pulseScale: CGFloat = 1.0
-    @State private var pulseOpacity: Double = 0.6
-    
-    init(serverHost: String, serverPort: String, voice: String, persona: String, speed: Double, onTranscript: @escaping ([(isUser: Bool, text: String)]) -> Void = { _ in }, onTurnCompleted: @escaping (_ isUser: Bool, _ text: String) -> Void = { _, _ in }) {
-        self.serverHost = serverHost
-        self.serverPort = serverPort
-        self.voice = voice
-        self.persona = persona
-        self.speed = speed
-        self.onTranscript = onTranscript
-        self.onTurnCompleted = onTurnCompleted
-        
-        let service = RealtimeCallService(
+
+    init(
+        serverHost: String,
+        serverPort: String,
+        voice: String,
+        persona: String,
+        speed: Double,
+        onTranscript: @escaping ([(isUser: Bool, text: String)]) -> Void = { _ in },
+        onTurnCompleted: @escaping (_ isUser: Bool, _ text: String) -> Void = { _, _ in }
+    ) {
+        let callService = LiveKitCallService(
             serverHost: serverHost,
             serverPort: serverPort,
             voice: voice,
             persona: persona,
             speed: speed
         )
-        service.onTurnCompleted = onTurnCompleted
-        _callService = StateObject(wrappedValue: service)
+        callService.onTurnCompleted = onTurnCompleted
+        _service = StateObject(wrappedValue: callService)
+        self.onTranscript = onTranscript
+        self.onTurnCompleted = onTurnCompleted
     }
-    
+
     var body: some View {
-        VStack(spacing: 20) {
+        VStack(spacing: 28) {
             Spacer()
-            
-            // Pulsing avatar circle
+
             ZStack {
-                // Outer pulsing rings
                 Circle()
-                    .stroke(pulseRingColor.opacity(pulseOpacity), lineWidth: 3)
-                    .frame(width: 160, height: 160)
-                    .scaleEffect(pulseScale)
-                
+                    .fill(service.isAISpeaking ? Color.green.opacity(0.18) : Color.white.opacity(0.08))
+                    .frame(width: 176, height: 176)
                 Circle()
-                    .stroke(pulseRingColor.opacity(pulseOpacity * 0.5), lineWidth: 2)
-                    .frame(width: 180, height: 180)
-                    .scaleEffect(pulseScale * 1.1)
-                
-                // Center avatar
-                Circle()
-                    .fill(
-                        LinearGradient(
-                            colors: avatarGradientColors,
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                    .frame(width: 120, height: 120)
-                    .overlay(
-                        Image(systemName: avatarIcon)
-                            .font(.system(size: 48))
-                            .foregroundColor(.white)
-                    )
+                    .fill(Color.white.opacity(0.10))
+                    .frame(width: 126, height: 126)
+                Image(systemName: service.isAISpeaking ? "waveform" : "phone.fill")
+                    .font(.system(size: 44, weight: .semibold))
+                    .foregroundStyle(.white)
             }
-            
-            // Status text
-            Text(statusText)
-                .font(.title2)
-                .fontWeight(.semibold)
-                .foregroundColor(.white)
-                .padding(.top, 8)
-            
-            // Call duration
-            Text(formatDuration(callService.callDuration))
-                .font(.subheadline)
-                .foregroundColor(.gray)
-            
-            Spacer()
-            
-            // Error message
-            if let error = callService.errorMessage {
+
+            VStack(spacing: 8) {
+                Text(service.statusText)
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(.white)
+                Text(format(service.callDuration))
+                    .font(.system(.body, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.68))
+            }
+
+            if let error = service.errorMessage {
                 Text(error)
-                    .font(.caption)
-                    .foregroundColor(.red.opacity(0.8))
-                    .padding(.bottom, 8)
+                    .font(.footnote)
+                    .foregroundStyle(.red.opacity(0.9))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 28)
             }
-            
-            // End call button
-            Button(action: endCall) {
-                ZStack {
-                    Circle()
-                        .fill(Color.red)
-                        .frame(width: 72, height: 72)
-                    
-                    Image(systemName: "phone.down.fill")
-                        .font(.title)
-                        .foregroundColor(.white)
-                }
+
+            Spacer()
+
+            Button {
+                service.endCall()
+                dismiss()
+            } label: {
+                Image(systemName: "phone.down.fill")
+                    .font(.title2.weight(.bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 72, height: 72)
+                    .background(Color.red, in: Circle())
             }
-            .disabled(!callService.isCallActive)
-            .opacity(callService.isCallActive ? 1.0 : 0.5)
-            
-            Text(callService.isCallActive ? "点击挂断" : "通话已结束")
-                .font(.caption)
-                .foregroundColor(.gray.opacity(0.7))
-                .padding(.bottom, 40)
+            .padding(.bottom, 42)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.black.opacity(0.9))
-        .ignoresSafeArea()
+        .background(Color(red: 0.08, green: 0.09, blue: 0.10))
         .onAppear {
             UIApplication.shared.isIdleTimerDisabled = true
-            startPulsing()
-            callService.startCall()
+            service.startCall()
         }
         .onDisappear {
             UIApplication.shared.isIdleTimerDisabled = false
-            let transcript = callService.transcript
-            callService.endCall()
-            // Pass transcript back to ContentView
+            let transcript = service.transcript
+            service.endCall()
             if !transcript.isEmpty {
                 onTranscript(transcript)
             }
         }
-        .onChange(of: callService.isCallActive) { active in
-            if !active {
-                dismiss()
-            }
-        }
     }
-    
-    // MARK: - Computed Properties
-    
-    private var statusText: String {
-        if callService.isAISpeaking {
-            return "🎙️ AI 说话中..."
-        } else if callService.isUserSpeaking {
-            return "🎤 正在听你说话..."
-        } else if callService.isCallActive {
-            return "💬 实时通话中..."
-        } else {
-            return "通话结束"
-        }
-    }
-    
-    private var avatarIcon: String {
-        if callService.isAISpeaking {
-            return "waveform"
-        } else if callService.isUserSpeaking {
-            return "mic.fill"
-        } else {
-            return "phone.fill"
-        }
-    }
-    
-    private var avatarGradientColors: [Color] {
-        if callService.isAISpeaking {
-            return [.green, .teal]
-        } else if callService.isUserSpeaking {
-            return [.blue, .purple]
-        } else {
-            return [.purple, .pink]
-        }
-    }
-    
-    private var pulseRingColor: Color {
-        if callService.isAISpeaking {
-            return .green
-        } else if callService.isUserSpeaking {
-            return .blue
-        } else {
-            return .purple
-        }
-    }
-    
-    // MARK: - Actions
-    
-    private func endCall() {
-        callService.endCall()
-        dismiss()
-    }
-    
-    // MARK: - Animations
-    
-    private func startPulsing() {
-        withAnimation(
-            Animation.easeInOut(duration: 1.5).repeatForever(autoreverses: true)
-        ) {
-            pulseScale = 1.15
-            pulseOpacity = 0.2
-        }
-    }
-    
-    private func formatDuration(_ interval: TimeInterval) -> String {
-        let minutes = Int(interval) / 60
-        let seconds = Int(interval) % 60
-        return String(format: "%02d:%02d", minutes, seconds)
+
+    private func format(_ duration: TimeInterval) -> String {
+        let value = Int(duration)
+        return String(format: "%02d:%02d", value / 60, value % 60)
     }
 }
