@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import Accelerate
+import Combine
 
 /// Manages a true full-duplex real-time voice conversation with the VoiceMate backend.
 ///
@@ -188,13 +189,10 @@ class RealtimeCallService: NSObject, ObservableObject {
             logger("Audio session configured: .playAndRecord + .default mode + speaker override")
         } catch {
             logger("Failed to configure audio session: \(error)")
-            // Fallback: try with .default mode
-            if let fallbackSession = try? AVAudioSession.sharedInstance() {
-                let fs = fallbackSession
-                try? fs.setCategory(.playAndRecord, mode: .default, options: [.allowBluetoothHFP, .defaultToSpeaker])
-                try? fs.overrideOutputAudioPort(.speaker)
-                try? fs.setActive(true, options: .notifyOthersOnDeactivation)
-            }
+            let fallbackSession = AVAudioSession.sharedInstance()
+            try? fallbackSession.setCategory(.playAndRecord, mode: .default, options: [.allowBluetoothHFP, .defaultToSpeaker])
+            try? fallbackSession.overrideOutputAudioPort(.speaker)
+            try? fallbackSession.setActive(true, options: .notifyOthersOnDeactivation)
         }
     }
 
@@ -630,7 +628,7 @@ class RealtimeCallService: NSObject, ObservableObject {
             } else {
                 // Playback state invalid — dropping buffer to avoid scheduling
                 // on a stopped node (crashes iOS 16.x).
-                logger("Dropping audio buffer: playback state invalid")
+                self.logger("Dropping audio buffer: playback state invalid")
             }
         }
     }

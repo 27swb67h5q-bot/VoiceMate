@@ -23,8 +23,6 @@ targets:
     platform: iOS
     sources:
       - path: VoiceMate
-        excludes:
-          - Services/RealtimeCallService.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.voicemate.app
