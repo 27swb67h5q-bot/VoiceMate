@@ -93,6 +93,14 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 logger = logging.getLogger("voicemate-livekit")
+try:
+    log_dir = Path(__file__).resolve().parent.parent / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    file_handler = logging.FileHandler(log_dir / "agent-runtime.log", encoding="utf-8")
+    file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    logging.getLogger().addHandler(file_handler)
+except Exception:
+    pass
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -123,7 +131,7 @@ ASR_WAKE_WORDS = tuple(
     for w in os.environ.get("VOICEMATE_ASR_WAKE_WORDS", "小妤,妤妤,VoiceMate").split(",")
     if w.strip()
 )
-SPEAKER_LOCK_ENABLED = os.environ.get("VOICEMATE_SPEAKER_LOCK", "1").lower() in {"1", "true", "yes", "auto"}
+SPEAKER_LOCK_ENABLED = os.environ.get("VOICEMATE_SPEAKER_LOCK", "0").lower() in {"1", "true", "yes", "auto"}
 SPEAKER_LOCK_MIN_SECONDS = float(os.environ.get("VOICEMATE_SPEAKER_LOCK_MIN_SECONDS", "1.2"))
 SPEAKER_LOCK_MIN_RMS = float(os.environ.get("VOICEMATE_SPEAKER_LOCK_MIN_RMS", "260"))
 SPEAKER_LOCK_THRESHOLD = float(os.environ.get("VOICEMATE_SPEAKER_LOCK_THRESHOLD", "0.58"))
@@ -916,7 +924,29 @@ async def entrypoint(ctx: JobContext):
             session.room_io.linked_participant.identity,
         )
 
-    await session.wait_for_inactive()
+    room_done = asyncio.Event()
+
+    def _on_participant_disconnected(participant: rtc.RemoteParticipant):
+        logger.info("Participant left room: %s", participant.identity)
+        if not ctx.room.remote_participants:
+            room_done.set()
+
+    def _on_room_disconnected(reason):
+        logger.info("LiveKit room disconnected: %s", reason)
+        room_done.set()
+
+    ctx.room.on("participant_disconnected", _on_participant_disconnected)
+    ctx.room.on("disconnected", _on_room_disconnected)
+    try:
+        if not ctx.room.remote_participants:
+            logger.info("No remote participant yet; keeping agent alive for late media publish")
+        await room_done.wait()
+    finally:
+        try:
+            ctx.room.off("participant_disconnected", _on_participant_disconnected)
+            ctx.room.off("disconnected", _on_room_disconnected)
+        except Exception:
+            pass
     logger.info(f"Room session ended for {ctx.room.name}")
 
 

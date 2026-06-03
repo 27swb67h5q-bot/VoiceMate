@@ -441,11 +441,23 @@ async def livekit_token(request: Optional[LiveKitTokenRequest] = None):
     try:
         from livekit import api
 
+        metadata_json = json.dumps(metadata, ensure_ascii=False)
+        room_config = api.RoomConfiguration(
+            name=room_name,
+            metadata=metadata_json,
+            agents=[
+                api.RoomAgentDispatch(
+                    agent_name=LIVEKIT_AGENT_NAME,
+                    metadata=metadata_json,
+                )
+            ],
+        )
         token = (
             api.AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
             .with_identity(identity)
             .with_name("VoiceMate")
-            .with_metadata(json.dumps(metadata, ensure_ascii=False))
+            .with_metadata(metadata_json)
+            .with_room_config(room_config)
             .with_grants(
                 api.VideoGrants(
                     room_join=True,

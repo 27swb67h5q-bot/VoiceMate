@@ -52,7 +52,7 @@ timeout /t 3 /nobreak >nul
 
 :: 4) 启动 LiveKit Agent
 echo [3/3] 启动 LiveKit Agent...
-start "VoiceMate-Agent" /MIN /D "%BACKEND_DIR%" cmd /c ""%VENV_PY%" "%BACKEND_DIR%\livekit_agent.py" dev"
+start "VoiceMate-Agent" /MIN /D "%BACKEND_DIR%" cmd /c ""%VENV_PY%" "%BACKEND_DIR%\livekit_agent.py" start"
 
 echo.
 echo ============================================================
