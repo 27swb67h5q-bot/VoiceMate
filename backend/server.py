@@ -105,8 +105,26 @@ def naturalize_text(text: str, emotion: str = "gentle") -> str:
     return strip_markdown(text)
 
 
+def strip_spoken_emotes(text: str) -> str:
+    text = text or ""
+    text = re.sub(
+        r"[\U0001F1E6-\U0001F1FF\U0001F300-\U0001FAFF\U00002700-\U000027BF\U00002600-\U000026FF]",
+        "",
+        text,
+    )
+    emote_words = (
+        "笑|微笑|偷笑|苦笑|大笑|开心|难过|委屈|害羞|脸红|眨眼|抱抱|叹气|哭|哭笑|"
+        "捂脸|思考|点头|摇头|撒娇|认真|温柔|惊讶|尴尬|可怜|调皮|爱心|心动"
+    )
+    text = re.sub(rf"[\(（\[]\s*(?:{emote_words})\s*[\)）\]]", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?:哈\s*){2,}", "", text)
+    text = re.sub(r"^[,，。.!！?？、\s]+", "", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
 def prepare_tts_text(text: str, emotion: str = "gentle") -> str:
-    return naturalize_text(text, emotion)
+    return strip_spoken_emotes(naturalize_text(text, emotion))
 
 
 def resolve_edge_voice(voice: Optional[str], emotion: str = "gentle") -> str:
@@ -272,6 +290,9 @@ class TTSEngine:
         audio_id = uuid.uuid4().hex[:16]
         output = AUDIO_DIR / f"{audio_id}.mp3"
         selected_voice = normalize_voice(voice)
+        text = prepare_tts_text(text)
+        if not text:
+            text = "嗯。"
         communicate = edge_tts.Communicate(
             text=text,
             voice=selected_voice,

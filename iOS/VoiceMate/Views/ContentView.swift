@@ -115,8 +115,8 @@ struct ContentView: View {
                 }
                 .frame(width: 36, height: 36)
 
-                TextField("输入消息", text: $inputText, axis: .vertical)
-                    .lineLimit(1...4)
+                TextField("输入消息", text: $inputText)
+                    .lineLimit(1)
                     .textFieldStyle(.plain)
                     .focused($inputFocused)
                     .padding(.horizontal, 12)

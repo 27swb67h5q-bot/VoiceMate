@@ -568,11 +568,14 @@ class DeepSeekLLMStream(llm.LLMStream):
     """Streaming wrapper for DeepSeek API responses."""
 
     def __init__(self, deepseek_llm: DeepSeekLLM, chat_ctx: llm.ChatContext, **kwargs):
+        from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS
+        kwargs.setdefault("tools", [])
+        kwargs.setdefault("conn_options", DEFAULT_API_CONNECT_OPTIONS)
         super().__init__(deepseek_llm, chat_ctx=chat_ctx, **kwargs)
         self._llm = deepseek_llm
         self._chat_ctx = chat_ctx
 
-    async def __aiter__(self) -> AsyncIterator[llm.ChatChunk]:
+    async def _run(self) -> None:
         messages, _ = self._chat_ctx.to_provider_format(
             "openai", inject_dummy_user_message=False
         )
@@ -585,16 +588,12 @@ class DeepSeekLLMStream(llm.LLMStream):
                 break
         if is_semantically_incomplete(last_user_text):
             logger.info("Semantic turn gate: waiting for continuation: %s", last_user_text[:80])
-            yield llm.ChatChunk(
+            self._event_ch.send_nowait(llm.ChatChunk(
                 id=str(uuid.uuid4()),
-                delta=llm.ChoiceDelta(
-                    role="assistant",
-                    content="嗯，你继续说，我听着。",
-                ),
-            )
+                delta=llm.ChoiceDelta(role="assistant", content="嗯，你继续说，我听着。"),
+            ))
             return
 
-        # Inject time context (matching server.py)
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M %A")
         weekday_map = {
             "Monday": "星期一", "Tuesday": "星期二", "Wednesday": "星期三",
@@ -609,14 +608,10 @@ class DeepSeekLLMStream(llm.LLMStream):
             enriched.append(msg)
             if msg.get("role") == "system":
                 enriched.append({"role": "user", "content": f"现在是北京时间 {current_time_cn}"})
-                enriched.append({"role": "assistant", "content": f"知道了，现在是 {current_time_cn}！"})
+                enriched.append({"role": "assistant", "content": f"知道了，现在是 {current_time_cn}。"})
 
-        has_system = any(m.get("role") == "system" for m in enriched)
-        if not has_system:
-            enriched.insert(
-                0,
-                {"role": "system", "content": PERSONAS.get(DEFAULT_PERSONA, PERSONAS["love"])},
-            )
+        if not any(m.get("role") == "system" for m in enriched):
+            enriched.insert(0, {"role": "system", "content": PERSONAS.get(DEFAULT_PERSONA, PERSONAS["love"])})
 
         try:
             response = await self._llm._client.chat.completions.create(
@@ -631,32 +626,24 @@ class DeepSeekLLMStream(llm.LLMStream):
                     continue
                 delta = chunk.choices[0].delta
                 if delta and delta.content:
-                    yield llm.ChatChunk(
+                    self._event_ch.send_nowait(llm.ChatChunk(
                         id=chunk.id or str(uuid.uuid4()),
-                        delta=llm.ChoiceDelta(
-                            role="assistant",
-                            content=delta.content,
-                        ),
-                    )
+                        delta=llm.ChoiceDelta(role="assistant", content=delta.content),
+                    ))
         except Exception as e:
-            logger.error(f"DeepSeek stream error: {e}")
-            yield llm.ChatChunk(
+            logger.error("DeepSeek stream error: %s", e)
+            self._event_ch.send_nowait(llm.ChatChunk(
                 id=str(uuid.uuid4()),
-                delta=llm.ChoiceDelta(
-                    role="assistant",
-                    content="嗯，我听到你了。不过我现在有点卡顿，能再说一遍吗？",
-                ),
-            )
+                delta=llm.ChoiceDelta(role="assistant", content="嗯，我听到你了。不过我现在有点卡，能再说一遍吗？"),
+            ))
 
-
-# ── Custom TTS: edge-tts ────────────────────────────────────────────────────
 
 class EdgeTTS(tts.TTS):
     """Text-to-Speech using edge-tts (Microsoft Edge neural voices)."""
 
     def __init__(self):
         super().__init__(
-            capabilities=tts.TTSCapabilities(streaming=True),
+            capabilities=tts.TTSCapabilities(streaming=False),
             sample_rate=24000,
             num_channels=1,
         )
@@ -667,92 +654,129 @@ class EdgeTTS(tts.TTS):
         return "edge-tts"
 
     def synthesize(self, text: str, **kwargs) -> tts.ChunkedStream:
-        return EdgeTTSChunkedStream(self, text)
+        return EdgeTTSChunkedStream(self, text, conn_options=kwargs.get("conn_options"))
 
 
 class EdgeTTSChunkedStream(tts.ChunkedStream):
-    """Produces PCM audio frames from edge-tts via ffmpeg decoding."""
+    """Produces PCM audio frames from edge-tts, with Windows SAPI fallback."""
 
-    def __init__(self, edge_tts_obj: EdgeTTS, text: str):
+    def __init__(self, edge_tts_obj: EdgeTTS, text: str, conn_options=None):
         from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS
         super().__init__(
             tts=edge_tts_obj,
             input_text=text,
-            conn_options=DEFAULT_API_CONNECT_OPTIONS,
+            conn_options=conn_options or DEFAULT_API_CONNECT_OPTIONS,
         )
         self._tts = edge_tts_obj
         self._text = text
 
-    async def _run(self, emitter: tts.AudioEmitter) -> None:
-        import edge_tts
+    async def _decode_to_pcm(self, input_bytes: bytes, input_format: str) -> bytes:
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-f", input_format, "-i", "pipe:0",
+            "-f", "s16le", "-acodec", "pcm_s16le",
+            "-ar", "24000", "-ac", "1",
+            "pipe:1",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        pcm_data, stderr = await proc.communicate(input=input_bytes)
+        if proc.returncode != 0:
+            logger.error("ffmpeg decode failed: %s", stderr.decode(errors="replace")[:200])
+            return b""
+        return pcm_data
 
-        emotion = detect_emotion(self._text)
+    async def _edge_pcm(self, text: str, emotion: str) -> bytes:
+        import edge_tts
         profile = EMOTION_TTS_PROFILES.get(emotion, EMOTION_TTS_PROFILES["gentle"])
         effective_voice = resolve_edge_voice(self._tts._voice, emotion)
-        effective_rate = profile.get("rate", "+0%")
-        effective_pitch = profile.get("pitch", "+0Hz")
+        communicate = edge_tts.Communicate(
+            text,
+            effective_voice,
+            rate=profile.get("rate", "+0%"),
+            pitch=profile.get("pitch", "+0Hz"),
+        )
+        mp3_buffer = bytearray()
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                mp3_buffer.extend(chunk["data"])
+        if not mp3_buffer:
+            return b""
+        return await self._decode_to_pcm(bytes(mp3_buffer), "mp3")
 
-        text = strip_markdown(self._text)
-        text = prepare_tts_text(text, emotion)
-
+    async def _sapi_pcm(self, text: str) -> bytes:
+        import tempfile
+        import shlex
+        wav_path = Path(tempfile.gettempdir()) / f"voicemate_sapi_{uuid.uuid4().hex}.wav"
+        txt_path = Path(tempfile.gettempdir()) / f"voicemate_sapi_{uuid.uuid4().hex}.txt"
         try:
-            communicate = edge_tts.Communicate(
-                text, effective_voice, rate=effective_rate, pitch=effective_pitch,
+            txt_path.write_text(text, encoding="utf-8")
+            ps = (
+                "Add-Type -AssemblyName System.Speech; "
+                f"$t = Get-Content -LiteralPath {shlex.quote(str(txt_path))} -Raw -Encoding UTF8; "
+                "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+                f"$s.SetOutputToWaveFile({shlex.quote(str(wav_path))}); "
+                "$s.Speak($t); $s.Dispose()"
             )
-
-            mp3_buffer = bytearray()
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio":
-                    mp3_buffer.extend(chunk["data"])
-
-            if not mp3_buffer:
-                logger.warning("edge-tts produced no audio")
-                return
-
-            # Decode MP3 -> PCM 24kHz 16-bit mono via ffmpeg
             proc = await asyncio.create_subprocess_exec(
-                "ffmpeg", "-y", "-i", "pipe:0",
-                "-f", "s16le", "-acodec", "pcm_s16le",
-                "-ar", "24000", "-ac", "1",
-                "pipe:1",
-                stdin=asyncio.subprocess.PIPE,
+                "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            pcm_data, stderr = await proc.communicate(input=bytes(mp3_buffer))
-            if proc.returncode != 0:
-                logger.error(f"ffmpeg decode failed: {stderr.decode(errors='replace')[:200]}")
-                return
+            _stdout, stderr = await proc.communicate()
+            if proc.returncode != 0 or not wav_path.exists():
+                logger.error("Windows SAPI fallback failed: %s", stderr.decode(errors="replace")[:200])
+                return b""
+            return await self._decode_to_pcm(wav_path.read_bytes(), "wav")
+        finally:
+            for path in (wav_path, txt_path):
+                try:
+                    path.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
-            if not pcm_data or len(pcm_data) < 960:
-                return
+    async def _run(self, emitter: tts.AudioEmitter) -> None:
+        emotion = detect_emotion(self._text)
+        text = prepare_tts_text(strip_markdown(self._text), emotion)
+        if not text:
+            text = "嗯。"
 
-            # Initialize emitter
-            request_id = str(uuid.uuid4())
-            emitter.initialize(
-                request_id=request_id,
-                sample_rate=24000,
-                num_channels=1,
-                mime_type="audio/pcm",
-            )
-
-            # Push 20ms frames (960 samples = 1920 bytes @ 24kHz 16-bit mono)
-            frame_size = 1920
-            offset = 0
-            while offset < len(pcm_data):
-                end = min(offset + frame_size, len(pcm_data))
-                chunk = pcm_data[offset:end]
-                if len(chunk) < frame_size:
-                    chunk += b'\x00' * (frame_size - len(chunk))
-                emitter.push(chunk)
-                offset = end
-
-            emitter.flush()
-
+        pcm_data = b""
+        try:
+            pcm_data = await self._edge_pcm(text, emotion)
         except Exception as e:
-            logger.error(f"edge-tts synthesis error: {e}")
+            logger.error("edge-tts synthesis error: %s", e)
 
-# ── VoiceMate Agent ─────────────────────────────────────────────────────────
+        if not pcm_data:
+            logger.warning("edge-tts produced no audio; using Windows SAPI fallback")
+            try:
+                pcm_data = await self._sapi_pcm(text)
+            except Exception as e:
+                logger.error("Windows SAPI synthesis error: %s", e)
+
+        if not pcm_data:
+            pcm_data = b"\x00" * 1920 * 5
+
+        request_id = str(uuid.uuid4())
+        emitter.initialize(
+            request_id=request_id,
+            sample_rate=24000,
+            num_channels=1,
+            mime_type="audio/pcm",
+        )
+
+        frame_size = 1920
+        offset = 0
+        while offset < len(pcm_data):
+            end = min(offset + frame_size, len(pcm_data))
+            chunk = pcm_data[offset:end]
+            if len(chunk) < frame_size:
+                chunk += b"\x00" * (frame_size - len(chunk))
+            emitter.push(chunk)
+            offset = end
+
+        emitter.flush()
+
 
 class MiMoLiveTTS(tts.TTS):
     """LiveKit TTS adapter for Xiaomi MiMo V2.5 TTS."""
