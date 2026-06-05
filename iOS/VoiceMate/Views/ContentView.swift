@@ -258,10 +258,10 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
 
     private let voices = [
-        "zh-CN-XiaoxiaoNeural": "晓晓",
-        "zh-CN-XiaoyiNeural": "晓伊",
-        "zh-CN-YunjianNeural": "云健",
-        "zh-CN-YunxiNeural": "云希",
+        "zh_female_wanqudashu_moon_bigtts": "火山女声",
+        "zh_male_wennuanahu_moon_bigtts": "火山男声",
+        "zh_female_qingxinnvsheng_mars_bigtts": "清新女声",
+        "zh_male_shaonianzixin_moon_bigtts": "少年男声",
     ]
 
     private let personas = [

@@ -270,6 +270,18 @@ def normalize_voice(voice: Optional[str]) -> str:
     return voice
 
 
+def normalize_volcengine_voice(voice: Optional[str]) -> str:
+    if not voice:
+        return VOLCENGINE_TTS_VOICE_TYPE
+    if voice.startswith("volc:"):
+        return voice.removeprefix("volc:")
+    if voice.endswith("Neural") or voice.startswith(("clone_", "fish_", "mimo_")):
+        return VOLCENGINE_TTS_VOICE_TYPE
+    if "_" not in voice:
+        return VOLCENGINE_TTS_VOICE_TYPE
+    return voice
+
+
 def audio_url(path: Path) -> str:
     return f"/v1/audio/{path.stem}"
 
@@ -352,7 +364,7 @@ class VolcengineTTSClient:
         import websockets
         from volcengine_audio import EventReceive, TTSAudioFormat, VolcengineTTSFunctions
 
-        speaker = voice if voice and not voice.startswith(("clone_", "fish_", "mimo_")) else self.voice_type
+        speaker = normalize_volcengine_voice(voice)
         session_id = str(uuid.uuid4())
         audio_params = {
             "format": TTSAudioFormat(audio_format).value,
