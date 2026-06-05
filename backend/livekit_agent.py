@@ -569,9 +569,14 @@ class DeepSeekLLMStream(llm.LLMStream):
 
     def __init__(self, deepseek_llm: DeepSeekLLM, chat_ctx: llm.ChatContext, **kwargs):
         from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS
-        kwargs.setdefault("tools", [])
-        kwargs.setdefault("conn_options", DEFAULT_API_CONNECT_OPTIONS)
-        super().__init__(deepseek_llm, chat_ctx=chat_ctx, **kwargs)
+        tools = kwargs.get("tools") or []
+        conn_options = kwargs.get("conn_options") or DEFAULT_API_CONNECT_OPTIONS
+        super().__init__(
+            deepseek_llm,
+            chat_ctx=chat_ctx,
+            tools=tools,
+            conn_options=conn_options,
+        )
         self._llm = deepseek_llm
         self._chat_ctx = chat_ctx
 
