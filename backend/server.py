@@ -484,9 +484,6 @@ async def health():
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    html = ROOT.parent / "voicemate.html"
-    if html.exists():
-        return HTMLResponse(html.read_text(encoding="utf-8"))
     return HTMLResponse("<h1>VoiceMate</h1><p>Backend is running.</p>")
 
 
