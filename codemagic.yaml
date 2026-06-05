@@ -87,9 +87,26 @@ workflows:
           mkdir -p Payload
           cp -Rf "$APP_PATH" Payload/
           IPA_PATH="${CM_BUILD_DIR:-$HOME/clone}/VoiceMate.ipa"
+          TIPA_PATH="${CM_BUILD_DIR:-$HOME/clone}/VoiceMate-trollstore.tipa"
           rm -f "$IPA_PATH"
-          zip -r "$IPA_PATH" Payload -q
+          rm -f "$TIPA_PATH"
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent Payload "$IPA_PATH"
+
+          echo "==> IPA contents:"
+          unzip -Z1 "$IPA_PATH" | head -80
+          if ! unzip -Z1 "$IPA_PATH" | grep -q '^Payload/VoiceMate.app/Info.plist$'; then
+            echo "ERROR: IPA is malformed. TrollStore requires Payload/VoiceMate.app/Info.plist at archive root."
+            exit 1
+          fi
+          if ! unzip -Z1 "$IPA_PATH" | grep -q '^Payload/VoiceMate.app/VoiceMate$'; then
+            echo "ERROR: IPA is malformed. Missing app executable at Payload/VoiceMate.app/VoiceMate."
+            exit 1
+          fi
+
+          cp "$IPA_PATH" "$TIPA_PATH"
           cd /tmp && rm -rf Payload
           echo "IPA ready at: $IPA_PATH"
+          echo "TIPA ready at: $TIPA_PATH"
     artifacts:
       - VoiceMate.ipa
+      - VoiceMate-trollstore.tipa
