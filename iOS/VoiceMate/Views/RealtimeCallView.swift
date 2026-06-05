@@ -84,11 +84,7 @@ struct RealtimeCallView: View {
         }
         .onDisappear {
             UIApplication.shared.isIdleTimerDisabled = false
-            let transcript = service.transcript
             service.endCall()
-            if !transcript.isEmpty {
-                onTranscript(transcript)
-            }
         }
     }
 

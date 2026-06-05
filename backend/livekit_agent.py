@@ -43,7 +43,7 @@ import re
 import array
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, AsyncIterator, AsyncIterable
+from typing import Optional, AsyncIterator, AsyncIterable, AsyncGenerator
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -922,6 +922,17 @@ class VoiceMateAgent(Agent):
     async def on_enter(self):
         logger.info(f"VoiceMate agent entered room [{self._conv_id}]")
 
+    async def _publish_call_event(self, event_type: str, **payload):
+        data = {"type": event_type, **payload}
+        try:
+            await self._ctx.room.local_participant.publish_data(
+                json.dumps(data, ensure_ascii=False),
+                reliable=True,
+                topic="voicemate.transcript",
+            )
+        except Exception as e:
+            logger.warning("Failed to publish call event %s: %s", event_type, e)
+
     async def on_user_turn_completed(self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage):
         user_text = ""
         if new_message and new_message.content:
@@ -932,6 +943,31 @@ class VoiceMateAgent(Agent):
                     user_text += c.text
 
         logger.info(f"User turn: {user_text[:80]} [{self._conv_id}]")
+        user_text = user_text.strip()
+        if user_text:
+            await self._publish_call_event("user_transcript", text=user_text, is_final=True)
+
+    async def llm_node(
+        self,
+        chat_ctx: llm.ChatContext,
+        tools: list[llm.Tool],
+        model_settings,
+    ) -> AsyncGenerator[llm.ChatChunk, None]:
+        tool_choice = getattr(model_settings, "tool_choice", None)
+        stream = self._deepseek_llm.chat(
+            chat_ctx=chat_ctx,
+            tools=tools,
+            tool_choice=tool_choice,
+        )
+        full_text: list[str] = []
+        async with stream:
+            async for chunk in stream:
+                if chunk.delta and chunk.delta.content:
+                    full_text.append(chunk.delta.content)
+                yield chunk
+        reply = "".join(full_text).strip()
+        if reply:
+            await self._publish_call_event("ai_turn_complete", text=reply)
 
 
 # ── LiveKit Agent Entry Point ───────────────────────────────────────────────

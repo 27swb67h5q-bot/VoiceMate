@@ -185,7 +185,7 @@ extension LiveKitCallService: RoomDelegate {
         }
     }
 
-    func room(_ room: Room, participant: RemoteParticipant, publication: RemoteTrackPublication, didReceive data: Data) {
+    func room(_ room: Room, participant: RemoteParticipant?, didReceiveData data: Data, forTopic topic: String) {
         handleData(data)
     }
 }
