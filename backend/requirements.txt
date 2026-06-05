@@ -6,6 +6,7 @@ python-dotenv>=1.0,<2
 aiohttp>=3.9,<4
 edge-tts>=7.0,<8
 openai>=1.0,<3
+volcengine-audio>=0.2.2,<0.3
 livekit-api>=1.0,<2
 livekit>=1.0,<2
 livekit-agents>=1.0,<2

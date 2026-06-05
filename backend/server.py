@@ -50,6 +50,14 @@ TTS_VOICE = DEFAULT_VOICE
 DEFAULT_PERSONA = os.environ.get("VOICEMATE_DEFAULT_PERSONA", "love")
 VOICEMATE_TTS_PROVIDER = os.environ.get("VOICEMATE_TTS_PROVIDER", "edge").strip().lower()
 
+VOLCENGINE_TTS_API_KEY = os.environ.get("VOLCENGINE_TTS_API_KEY", "")
+VOLCENGINE_TTS_APP_ID = os.environ.get("VOLCENGINE_TTS_APP_ID", os.environ.get("VOLC_APPID", ""))
+VOLCENGINE_TTS_ACCESS_KEY = os.environ.get("VOLCENGINE_TTS_ACCESS_KEY", os.environ.get("VOLC_TOKEN", ""))
+VOLCENGINE_TTS_RESOURCE_ID = os.environ.get("VOLCENGINE_TTS_RESOURCE_ID", "volc.service_type.10029")
+VOLCENGINE_TTS_WS_URL = os.environ.get("VOLCENGINE_TTS_WS_URL", "wss://openspeech.bytedance.com/api/v3/tts/bidirection")
+VOLCENGINE_TTS_VOICE_TYPE = os.environ.get("VOLCENGINE_TTS_VOICE_TYPE", "zh_female_wanqudashu_moon_bigtts")
+VOLCENGINE_TTS_MODEL = os.environ.get("VOLCENGINE_TTS_MODEL", "seed-tts-2.0-expressive")
+
 LIVEKIT_HOST = os.environ.get("LIVEKIT_HOST", PUBLIC_HOST)
 LIVEKIT_PORT = int(os.environ.get("LIVEKIT_PORT", "7880"))
 LIVEKIT_URL = os.environ.get("LIVEKIT_URL", f"ws://{LIVEKIT_HOST}:{LIVEKIT_PORT}")
@@ -239,6 +247,19 @@ def tts_rate(speed: Optional[float]) -> str:
     return f"{percent:+d}%"
 
 
+def volc_speech_rate(speed: Optional[float]) -> int:
+    value = max(0.5, min(float(speed or 1.0), 2.0))
+    return max(-50, min(100, int((value - 1.0) * 100)))
+
+
+def volc_emotion(emotion: str) -> Optional[str]:
+    return {
+        "cheerful": "happy",
+        "curious": "happy",
+        "comforting": "sad",
+    }.get(emotion)
+
+
 def normalize_voice(voice: Optional[str]) -> str:
     if not voice:
         return DEFAULT_VOICE
@@ -283,7 +304,123 @@ class LLMClient:
             return f"我刚才有点卡住了，但我听到你说：{text}"
 
 
+class VolcengineTTSClient:
+    def __init__(self):
+        self.api_key = VOLCENGINE_TTS_API_KEY
+        self.app_id = VOLCENGINE_TTS_APP_ID
+        self.access_key = VOLCENGINE_TTS_ACCESS_KEY
+        self.resource_id = VOLCENGINE_TTS_RESOURCE_ID
+        self.ws_url = VOLCENGINE_TTS_WS_URL
+        self.voice_type = VOLCENGINE_TTS_VOICE_TYPE
+        self.model = VOLCENGINE_TTS_MODEL
+
+    @property
+    def is_available(self) -> bool:
+        return bool((self.api_key or (self.app_id and self.access_key)) and self.resource_id)
+
+    def _headers(self) -> dict[str, str]:
+        headers = {
+            "X-Api-Resource-Id": self.resource_id,
+            "X-Api-Connect-Id": str(uuid.uuid4()),
+        }
+        if self.api_key:
+            headers["X-Api-Key"] = self.api_key
+        else:
+            headers["X-Api-App-Key"] = self.app_id
+            headers["X-Api-Access-Key"] = self.access_key
+        return headers
+
+    @staticmethod
+    async def _connect(websockets, url: str, headers: dict[str, str]):
+        try:
+            return await websockets.connect(url, additional_headers=headers, max_size=1000000000)
+        except TypeError:
+            return await websockets.connect(url, extra_headers=headers, max_size=1000000000)
+
+    async def synthesize_bytes(
+        self,
+        text: str,
+        *,
+        voice: Optional[str] = None,
+        speed: Optional[float] = 1.0,
+        emotion: str = "gentle",
+        audio_format: str = "mp3",
+    ) -> bytes:
+        if not self.is_available:
+            raise RuntimeError("Volcengine TTS credentials are not configured")
+
+        import websockets
+        from volcengine_audio import EventReceive, TTSAudioFormat, VolcengineTTSFunctions
+
+        speaker = voice if voice and not voice.startswith(("clone_", "fish_", "mimo_")) else self.voice_type
+        session_id = str(uuid.uuid4())
+        audio_params = {
+            "format": TTSAudioFormat(audio_format).value,
+            "sample_rate": 24000,
+            "speech_rate": volc_speech_rate(speed),
+        }
+        emotion_name = volc_emotion(emotion)
+        if emotion_name:
+            audio_params["emotion"] = emotion_name
+            audio_params["emotion_scale"] = 4
+
+        req_params = {
+            "text": text,
+            "speaker": speaker,
+            "model": self.model,
+            "audio_params": audio_params,
+        }
+
+        chunks = bytearray()
+        recv_timeout = float(os.environ.get("VOLCENGINE_TTS_TIMEOUT_SECONDS", "18"))
+        async with await self._connect(websockets, self.ws_url, self._headers()) as ws:
+            await ws.send(VolcengineTTSFunctions.start_connection_payload())
+            await asyncio.wait_for(ws.recv(), timeout=recv_timeout)
+            await ws.send(VolcengineTTSFunctions.start_session_payload(session_id, req_params))
+            await asyncio.wait_for(ws.recv(), timeout=recv_timeout)
+            await ws.send(VolcengineTTSFunctions.task_request_payload(session_id, text, speaker, audio_params))
+
+            while True:
+                event, _sid, payload = VolcengineTTSFunctions.extract_response_payload(
+                    await asyncio.wait_for(ws.recv(), timeout=recv_timeout)
+                )
+                if event == EventReceive.TTSResponse and isinstance(payload, (bytes, bytearray)):
+                    chunks.extend(payload)
+                elif event == EventReceive.SessionFailed:
+                    raise RuntimeError(f"Volcengine TTS session failed: {payload}")
+                elif event in (EventReceive.TTSSentenceEnd, EventReceive.TTSEnded):
+                    break
+                elif getattr(event, "name", "") in {
+                    "ConnectionFailed",
+                    "SessionFailed",
+                    "REQUESTED_RESOURCE_NOT_GRANTED",
+                    "WAITING_NEXT_PACKET_TIMEOUT",
+                    "SERVER_PROCESSING_ERROR",
+                    "SERVICE_UNAVAILABLE",
+                    "AUDIO_FLOW_ERROR",
+                }:
+                    raise RuntimeError(f"Volcengine TTS error event {event}: {payload}")
+
+            await ws.send(VolcengineTTSFunctions.finish_session_payload(session_id))
+            while True:
+                event, _sid, payload = VolcengineTTSFunctions.extract_response_payload(
+                    await asyncio.wait_for(ws.recv(), timeout=recv_timeout)
+                )
+                if event == EventReceive.SessionFinished:
+                    break
+                if event == EventReceive.SessionFailed:
+                    raise RuntimeError(f"Volcengine TTS finish failed: {payload}")
+            await ws.send(VolcengineTTSFunctions.finish_connection_payload())
+
+        if not chunks:
+            raise RuntimeError("Volcengine TTS returned empty audio")
+        return bytes(chunks)
+
+
 class TTSEngine:
+    def __init__(self):
+        self._volc = VolcengineTTSClient()
+
     async def synthesize(self, text: str, voice: Optional[str], speed: Optional[float]) -> tuple[Path, int]:
         import edge_tts
 
@@ -293,6 +430,21 @@ class TTSEngine:
         text = prepare_tts_text(text)
         if not text:
             text = "嗯。"
+        if VOICEMATE_TTS_PROVIDER == "volcengine" and self._volc.is_available:
+            try:
+                output.write_bytes(
+                    await self._volc.synthesize_bytes(
+                        text,
+                        voice=voice,
+                        speed=speed,
+                        emotion=detect_emotion(text),
+                        audio_format="mp3",
+                    )
+                )
+                return output, max(650, int(len(text) / 5.2 * 1000))
+            except Exception:
+                logger.exception("volcengine tts failed, falling back to edge-tts")
+
         communicate = edge_tts.Communicate(
             text=text,
             voice=selected_voice,

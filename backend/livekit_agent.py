@@ -83,6 +83,7 @@ from server import (
     VOICEMATE_TTS_PROVIDER,
     is_semantically_incomplete,
     AUDIO_DIR,
+    VolcengineTTSClient,
     logger as voicemate_logger,
 )
 
@@ -783,6 +784,75 @@ class EdgeTTSChunkedStream(tts.ChunkedStream):
         emitter.flush()
 
 
+class VolcengineLiveTTS(tts.TTS):
+    """LiveKit TTS adapter for Volcengine V3 bidirectional TTS."""
+
+    def __init__(self):
+        super().__init__(
+            capabilities=tts.TTSCapabilities(streaming=False),
+            sample_rate=24000,
+            num_channels=1,
+        )
+        self._client = VolcengineTTSClient()
+
+    @property
+    def provider(self) -> str:
+        return "volcengine"
+
+    @property
+    def is_available(self) -> bool:
+        return self._client.is_available
+
+    def synthesize(self, text: str, **kwargs) -> tts.ChunkedStream:
+        return VolcengineLiveTTSChunkedStream(self, text)
+
+
+class VolcengineLiveTTSChunkedStream(tts.ChunkedStream):
+    def __init__(self, volc_tts_obj: VolcengineLiveTTS, text: str):
+        from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS
+        super().__init__(
+            tts=volc_tts_obj,
+            input_text=text,
+            conn_options=DEFAULT_API_CONNECT_OPTIONS,
+        )
+        self._tts = volc_tts_obj
+        self._text = text
+
+    async def _run(self, emitter: tts.AudioEmitter) -> None:
+        emotion = detect_emotion(self._text)
+        text = prepare_tts_text(strip_markdown(self._text), emotion)
+        if not text:
+            text = "嗯"
+
+        pcm_data = await self._tts._client.synthesize_bytes(
+            text,
+            speed=1.0,
+            emotion=emotion,
+            audio_format="pcm",
+        )
+        if not pcm_data:
+            return
+
+        emitter.initialize(
+            request_id=str(uuid.uuid4()),
+            sample_rate=24000,
+            num_channels=1,
+            mime_type="audio/pcm",
+        )
+
+        frame_size = 1920
+        offset = 0
+        while offset < len(pcm_data):
+            end = min(offset + frame_size, len(pcm_data))
+            chunk = pcm_data[offset:end]
+            if len(chunk) < frame_size:
+                chunk += b"\x00" * (frame_size - len(chunk))
+            emitter.push(chunk)
+            offset = end
+
+        emitter.flush()
+
+
 class MiMoLiveTTS(tts.TTS):
     """LiveKit TTS adapter for Xiaomi MiMo V2.5 TTS."""
 
@@ -888,9 +958,15 @@ class VoiceMateAgent(Agent):
         self._whisper_stt = WhisperSTT()
         self._deepseek_llm = DeepSeekLLM()
         self._edge_tts = EdgeTTS()
+        self._volc_tts = VolcengineLiveTTS()
         self._mimo_tts = MiMoLiveTTS()
         self._active_tts = self._edge_tts
-        if REALTIME_TTS_PROVIDER == "mimo":
+        if REALTIME_TTS_PROVIDER == "volcengine":
+            if self._volc_tts.is_available:
+                self._active_tts = self._volc_tts
+            else:
+                logger.warning("VOICEMATE_REALTIME_TTS_PROVIDER=volcengine but credentials are not configured; using edge-tts")
+        elif REALTIME_TTS_PROVIDER == "mimo":
             if self._mimo_tts.is_available:
                 self._active_tts = self._mimo_tts
             else:
