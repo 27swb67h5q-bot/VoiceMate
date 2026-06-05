@@ -33,7 +33,7 @@ workflows:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             build
-      - name: Package IPA for TrollStore
+      - name: Package IPA
         script: |
           # Find .app bundle
           DERIVED_DATA="$CM_BUILD_DIR/DerivedData"
@@ -87,9 +87,7 @@ workflows:
           mkdir -p Payload
           cp -Rf "$APP_PATH" Payload/
           IPA_PATH="${CM_BUILD_DIR:-$HOME/clone}/VoiceMate.ipa"
-          TIPA_PATH="${CM_BUILD_DIR:-$HOME/clone}/VoiceMate-trollstore.tipa"
           rm -f "$IPA_PATH"
-          rm -f "$TIPA_PATH"
           /usr/bin/ditto -c -k --sequesterRsrc --keepParent Payload "$IPA_PATH"
 
           echo "==> IPA contents:"
@@ -103,10 +101,7 @@ workflows:
             exit 1
           fi
 
-          cp "$IPA_PATH" "$TIPA_PATH"
           cd /tmp && rm -rf Payload
           echo "IPA ready at: $IPA_PATH"
-          echo "TIPA ready at: $TIPA_PATH"
     artifacts:
       - VoiceMate.ipa
-      - VoiceMate-trollstore.tipa
