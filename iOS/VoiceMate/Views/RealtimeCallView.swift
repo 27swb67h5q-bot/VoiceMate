@@ -52,6 +52,11 @@ struct RealtimeCallView: View {
                 Text(format(service.callDuration))
                     .font(.system(.body, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.68))
+                if let metrics = service.metricsText {
+                    Text(metrics)
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.48))
+                }
             }
 
             if let error = service.errorMessage {

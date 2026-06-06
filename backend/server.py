@@ -51,7 +51,7 @@ DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 DEFAULT_VOICE = os.environ.get("VOICEMATE_TTS_VOICE", "zh-CN-XiaoxiaoNeural")
 TTS_VOICE = DEFAULT_VOICE
 DEFAULT_PERSONA = os.environ.get("VOICEMATE_DEFAULT_PERSONA", "love")
-VOICEMATE_TTS_PROVIDER = os.environ.get("VOICEMATE_TTS_PROVIDER", "edge").strip().lower()
+VOICEMATE_TTS_PROVIDER = os.environ.get("VOICEMATE_TTS_PROVIDER", "volcengine").strip().lower()
 
 VOLCENGINE_TTS_API_KEY = os.environ.get("VOLCENGINE_TTS_API_KEY", "")
 VOLCENGINE_TTS_APP_ID = os.environ.get("VOLCENGINE_TTS_APP_ID", os.environ.get("VOLC_APPID", ""))
@@ -380,9 +380,39 @@ class VolcengineTTSClient:
         if not self.is_available:
             raise RuntimeError("Volcengine TTS credentials are not configured")
 
+        chunks = bytearray()
+        async with await self.open_ws() as ws:
+            from volcengine_audio import VolcengineTTSFunctions
+            chunks.extend(await self.synthesize_bytes_on_ws(ws, text, voice=voice, speed=speed, emotion=emotion, audio_format=audio_format))
+            await ws.send(VolcengineTTSFunctions.finish_connection_payload())
+
+        if not chunks:
+            raise RuntimeError("Volcengine TTS returned empty audio")
+        return bytes(chunks)
+
+    async def open_ws(self):
         import websockets
+        from volcengine_audio import VolcengineTTSFunctions
+
+        recv_timeout = float(os.environ.get("VOLCENGINE_TTS_TIMEOUT_SECONDS", "18"))
+        ws = await self._connect(websockets, self.ws_url, self._headers())
+        await ws.send(VolcengineTTSFunctions.start_connection_payload())
+        await asyncio.wait_for(ws.recv(), timeout=recv_timeout)
+        return ws
+
+    async def synthesize_bytes_on_ws(
+        self,
+        ws,
+        text: str,
+        *,
+        voice: Optional[str] = None,
+        speed: Optional[float] = 1.0,
+        emotion: str = "gentle",
+        audio_format: str = "mp3",
+    ) -> bytes:
         from volcengine_audio import EventReceive, TTSAudioFormat, VolcengineTTSFunctions
 
+        recv_timeout = float(os.environ.get("VOLCENGINE_TTS_TIMEOUT_SECONDS", "18"))
         speaker = normalize_volcengine_voice(voice)
         session_id = str(uuid.uuid4())
         audio_params = {
@@ -403,48 +433,30 @@ class VolcengineTTSClient:
         }
 
         chunks = bytearray()
-        recv_timeout = float(os.environ.get("VOLCENGINE_TTS_TIMEOUT_SECONDS", "18"))
-        async with await self._connect(websockets, self.ws_url, self._headers()) as ws:
-            await ws.send(VolcengineTTSFunctions.start_connection_payload())
-            await asyncio.wait_for(ws.recv(), timeout=recv_timeout)
-            await ws.send(VolcengineTTSFunctions.start_session_payload(session_id, req_params))
-            await asyncio.wait_for(ws.recv(), timeout=recv_timeout)
-            await ws.send(VolcengineTTSFunctions.task_request_payload(session_id, text, speaker, audio_params))
+        await ws.send(VolcengineTTSFunctions.start_session_payload(session_id, req_params))
+        await asyncio.wait_for(ws.recv(), timeout=recv_timeout)
+        await ws.send(VolcengineTTSFunctions.task_request_payload(session_id, text, speaker, audio_params))
 
-            while True:
-                event, _sid, payload = VolcengineTTSFunctions.extract_response_payload(
-                    await asyncio.wait_for(ws.recv(), timeout=recv_timeout)
-                )
-                if event == EventReceive.TTSResponse and isinstance(payload, (bytes, bytearray)):
-                    chunks.extend(payload)
-                elif event == EventReceive.SessionFailed:
-                    raise RuntimeError(f"Volcengine TTS session failed: {payload}")
-                elif event in (EventReceive.TTSSentenceEnd, EventReceive.TTSEnded):
-                    break
-                elif getattr(event, "name", "") in {
-                    "ConnectionFailed",
-                    "SessionFailed",
-                    "REQUESTED_RESOURCE_NOT_GRANTED",
-                    "WAITING_NEXT_PACKET_TIMEOUT",
-                    "SERVER_PROCESSING_ERROR",
-                    "SERVICE_UNAVAILABLE",
-                    "AUDIO_FLOW_ERROR",
-                }:
-                    raise RuntimeError(f"Volcengine TTS error event {event}: {payload}")
+        while True:
+            event, _sid, payload = VolcengineTTSFunctions.extract_response_payload(
+                await asyncio.wait_for(ws.recv(), timeout=recv_timeout)
+            )
+            if event == EventReceive.TTSResponse and isinstance(payload, (bytes, bytearray)):
+                chunks.extend(payload)
+            elif event == EventReceive.SessionFailed:
+                raise RuntimeError(f"Volcengine TTS session failed: {payload}")
+            elif event in (EventReceive.TTSSentenceEnd, EventReceive.TTSEnded):
+                break
 
-            await ws.send(VolcengineTTSFunctions.finish_session_payload(session_id))
-            while True:
-                event, _sid, payload = VolcengineTTSFunctions.extract_response_payload(
-                    await asyncio.wait_for(ws.recv(), timeout=recv_timeout)
-                )
-                if event == EventReceive.SessionFinished:
-                    break
-                if event == EventReceive.SessionFailed:
-                    raise RuntimeError(f"Volcengine TTS finish failed: {payload}")
-            await ws.send(VolcengineTTSFunctions.finish_connection_payload())
-
-        if not chunks:
-            raise RuntimeError("Volcengine TTS returned empty audio")
+        await ws.send(VolcengineTTSFunctions.finish_session_payload(session_id))
+        while True:
+            event, _sid, payload = VolcengineTTSFunctions.extract_response_payload(
+                await asyncio.wait_for(ws.recv(), timeout=recv_timeout)
+            )
+            if event == EventReceive.SessionFinished:
+                break
+            if event == EventReceive.SessionFailed:
+                raise RuntimeError(f"Volcengine TTS finish failed: {payload}")
         return bytes(chunks)
 
 
@@ -453,15 +465,16 @@ class TTSEngine:
         self._volc = VolcengineTTSClient()
 
     async def synthesize(self, text: str, voice: Optional[str], speed: Optional[float]) -> tuple[Path, int]:
-        import edge_tts
-
         audio_id = uuid.uuid4().hex[:16]
         output = AUDIO_DIR / f"{audio_id}.mp3"
-        selected_voice = normalize_voice(voice)
         text = prepare_tts_text(text)
         if not text:
             text = "嗯。"
-        if VOICEMATE_TTS_PROVIDER == "volcengine" and self._volc.is_available:
+        if VOICEMATE_TTS_PROVIDER != "volcengine":
+            logger.warning("Ignoring VOICEMATE_TTS_PROVIDER=%s; VoiceMate now uses Volcengine TTS only", VOICEMATE_TTS_PROVIDER)
+        if not self._volc.is_available:
+            raise RuntimeError("Volcengine TTS credentials are not configured")
+        if self._volc.is_available:
             try:
                 output.write_bytes(
                     await self._volc.synthesize_bytes(
@@ -477,19 +490,7 @@ class TTSEngine:
                 logger.exception("volcengine tts failed")
                 raise
 
-        communicate = edge_tts.Communicate(
-            text=text,
-            voice=selected_voice,
-            rate=tts_rate(speed),
-        )
-        try:
-            await communicate.save(str(output))
-        except Exception:
-            logger.exception("edge-tts failed, retrying default voice")
-            communicate = edge_tts.Communicate(text=text, voice=DEFAULT_VOICE, rate=tts_rate(speed))
-            await communicate.save(str(output))
-        duration_ms = max(800, int(len(text) / 4.5 * 1000))
-        return output, duration_ms
+        raise RuntimeError("Volcengine TTS did not produce audio")
 
 
 llm = LLMClient()

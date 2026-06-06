@@ -10,6 +10,7 @@ final class LiveKitCallService: NSObject, ObservableObject {
     @Published var callDuration: TimeInterval = 0
     @Published var errorMessage: String?
     @Published var transcript: [(isUser: Bool, text: String)] = []
+    @Published var metricsText: String?
 
     private let serverHost: String
     private let serverPort: String
@@ -134,6 +135,16 @@ final class LiveKitCallService: NSObject, ObservableObject {
             case "ai_speaking":
                 self.isAISpeaking = true
                 self.statusText = "AI 正在说话"
+            case "call_state":
+                if let state = object["state"] as? String {
+                    self.statusText = self.label(for: state)
+                    self.isAISpeaking = state == "speaking"
+                }
+            case "metrics":
+                if let label = object["label"] as? String,
+                   let value = object["value_ms"] as? Double {
+                    self.metricsText = "\(label) \(Int(value))ms"
+                }
             case "ai_turn_complete":
                 self.isAISpeaking = false
                 self.statusText = "正在通话"
@@ -146,6 +157,21 @@ final class LiveKitCallService: NSObject, ObservableObject {
             default:
                 break
             }
+        }
+    }
+
+    private func label(for state: String) -> String {
+        switch state {
+        case "listening":
+            return "我在听"
+        case "thinking":
+            return "正在想怎么回应"
+        case "speaking":
+            return "正在回应"
+        case "interrupted":
+            return "已打断，继续听你说"
+        default:
+            return "正在通话"
         }
     }
 }
