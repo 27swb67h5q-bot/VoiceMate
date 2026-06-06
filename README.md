@@ -8,7 +8,7 @@ Current stack:
 - FastAPI backend for text chat, voice clone placeholders, audio files, and LiveKit tokens.
 - LiveKit realtime voice call pipeline.
 - DeepSeek-compatible LLM.
-- Volcengine V3 TTS as the primary voice provider, with edge-tts fallback.
+- Volcengine streaming ASR and Volcengine V3 TTS as the only voice providers.
 - Codemagic unsigned IPA build for TrollStore.
 
 ## Repository Layout
@@ -38,8 +38,6 @@ LIVEKIT_HOST=192.168.10.233
 LIVEKIT_PORT=7880
 LIVEKIT_API_KEY=
 LIVEKIT_API_SECRET=
-VOICEMATE_TTS_PROVIDER=volcengine
-VOICEMATE_REALTIME_TTS_PROVIDER=volcengine
 VOLCENGINE_TTS_API_KEY=
 VOLCENGINE_TTS_RESOURCE_ID=volc.service_type.10029
 VOLCENGINE_TTS_WS_URL=wss://openspeech.bytedance.com/api/v3/tts/bidirection
@@ -71,7 +69,7 @@ Install the IPA with TrollStore.
 Realtime calls use LiveKit:
 
 ```text
-iOS microphone -> LiveKit -> backend agent -> STT -> LLM -> Volcengine TTS -> LiveKit -> iOS speaker
+iOS microphone -> LiveKit -> backend agent -> Volcengine ASR -> LLM -> Volcengine TTS -> LiveKit -> iOS speaker
 ```
 
 The backend publishes realtime transcripts back to the app so call turns can be shown in the chat panel.

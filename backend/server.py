@@ -48,10 +48,9 @@ DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 
-DEFAULT_VOICE = os.environ.get("VOICEMATE_TTS_VOICE", "zh-CN-XiaoxiaoNeural")
+DEFAULT_VOICE = os.environ.get("VOICEMATE_TTS_VOICE", "zh_female_wanqudashu_moon_bigtts")
 TTS_VOICE = DEFAULT_VOICE
 DEFAULT_PERSONA = os.environ.get("VOICEMATE_DEFAULT_PERSONA", "love")
-VOICEMATE_TTS_PROVIDER = os.environ.get("VOICEMATE_TTS_PROVIDER", "volcengine").strip().lower()
 
 VOLCENGINE_TTS_API_KEY = os.environ.get("VOLCENGINE_TTS_API_KEY", "")
 VOLCENGINE_TTS_APP_ID = os.environ.get("VOLCENGINE_TTS_APP_ID", os.environ.get("VOLC_APPID", ""))
@@ -144,24 +143,11 @@ def prepare_tts_text(text: str, emotion: str = "gentle") -> str:
     return strip_spoken_emotes(naturalize_text(text, emotion))
 
 
-def resolve_edge_voice(voice: Optional[str], emotion: str = "gentle") -> str:
-    return normalize_voice(voice)
-
-
 def is_semantically_incomplete(text: str) -> bool:
     compact = clean_text(text)
     if not compact:
         return True
     return compact.endswith(("，", ",", "、", "但是", "然后", "因为"))
-
-
-class MiMoTTS:
-    @property
-    def is_available(self) -> bool:
-        return False
-
-    async def synthesize(self, text: str, emotion: str = "gentle", speed_ratio: Optional[float] = 1.0):
-        return await tts.synthesize(text, DEFAULT_VOICE, speed_ratio)
 
 
 class ChatRequest(BaseModel):
@@ -286,15 +272,7 @@ def volc_emotion(emotion: str) -> Optional[str]:
 
 
 def normalize_voice(voice: Optional[str]) -> str:
-    if not voice:
-        return DEFAULT_VOICE
-    if voice.startswith("clone_"):
-        return DEFAULT_VOICE
-    if voice.startswith("fish_") or voice.startswith("mimo_"):
-        return DEFAULT_VOICE
-    if "_" in voice and not voice.endswith("Neural"):
-        return DEFAULT_VOICE
-    return voice
+    return normalize_volcengine_voice(voice)
 
 
 def normalize_volcengine_voice(voice: Optional[str]) -> str:
@@ -302,8 +280,6 @@ def normalize_volcengine_voice(voice: Optional[str]) -> str:
         return VOLCENGINE_TTS_VOICE_TYPE
     if voice.startswith("volc:"):
         return voice.removeprefix("volc:")
-    if voice.endswith("Neural") or voice.startswith(("clone_", "fish_", "mimo_")):
-        return VOLCENGINE_TTS_VOICE_TYPE
     if "_" not in voice:
         return VOLCENGINE_TTS_VOICE_TYPE
     if voice.startswith("zh_female_") and voice in VOLCENGINE_TTS_FEMALE_VOICES:
@@ -492,8 +468,6 @@ class TTSEngine:
         text = prepare_tts_text(text)
         if not text:
             text = "嗯。"
-        if VOICEMATE_TTS_PROVIDER != "volcengine":
-            logger.warning("Ignoring VOICEMATE_TTS_PROVIDER=%s; VoiceMate now uses Volcengine TTS only", VOICEMATE_TTS_PROVIDER)
         if not self._volc.is_available:
             raise RuntimeError("Volcengine TTS credentials are not configured")
         if self._volc.is_available:

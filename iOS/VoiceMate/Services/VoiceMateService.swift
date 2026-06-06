@@ -44,9 +44,7 @@ final class VoiceMateService: NSObject, ObservableObject {
     }
 
     private static func normalizedVoice(_ voice: String?) -> String {
-        guard let voice, !voice.hasSuffix("Neural") else {
-            return "zh_female_wanqudashu_moon_bigtts"
-        }
+        guard let voice, voice.hasPrefix("zh_female_") else { return "zh_female_wanqudashu_moon_bigtts" }
         return voice
     }
 

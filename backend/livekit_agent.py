@@ -6,7 +6,7 @@ Connects to a local LiveKit server, receives user voice in real-time,
 processes with DeepSeek LLM, and responds with Volcengine voice synthesis.
 
 Architecture:
-  User mic → LiveKit Room → (VAD) → STT (Volcengine/Whisper) → DeepSeek LLM → Volcengine TTS → LiveKit Room → User speaker
+  User mic → LiveKit Room → (VAD) → Volcengine streaming ASR → DeepSeek LLM → Volcengine TTS → LiveKit Room → User speaker
 
 Supports:
   - Real-time voice via LiveKit Agent pipeline
@@ -18,7 +18,7 @@ Supports:
 
 Usage:
   # Install deps (already in venv):
-  #   pip install livekit livekit-agents openai webrtcvad faster-whisper
+  #   pip install livekit livekit-agents openai webrtcvad volcengine-audio
 
   # Set env vars:
   #   export LIVEKIT_URL=ws://localhost:7880
@@ -78,9 +78,6 @@ from server import (
     detect_emotion,
     prepare_tts_text,
     EMOTION_TTS_PROFILES,
-    resolve_edge_voice,
-    MiMoTTS,
-    VOICEMATE_TTS_PROVIDER,
     is_semantically_incomplete,
     AUDIO_DIR,
     VolcengineTTSClient,
@@ -112,17 +109,8 @@ LIVEKIT_API_KEY = os.environ.get("LIVEKIT_API_KEY", "")
 LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "")
 LIVEKIT_AGENT_NAME = os.environ.get("LIVEKIT_AGENT_NAME", "VoiceMate")
 LLM_MAX_TOKENS = int(os.environ.get("VOICEMATE_LLM_MAX_TOKENS", "140"))
-REALTIME_TTS_PROVIDER = os.environ.get("VOICEMATE_REALTIME_TTS_PROVIDER", VOICEMATE_TTS_PROVIDER).strip().lower()
-ASR_MODEL = (os.environ.get("VOICEMATE_ASR_MODEL", "base").strip() or "base")
-ASR_DEVICE = (os.environ.get("VOICEMATE_ASR_DEVICE", "cpu").strip() or "cpu")
-ASR_COMPUTE_TYPE = (os.environ.get("VOICEMATE_ASR_COMPUTE_TYPE", "int8").strip() or "int8")
-ASR_API_KEY = os.environ.get("VOICE_TOOLS_OPENAI_KEY") or os.environ.get("OPENAI_API_KEY", "")
-ASR_API_BASE_URL = (
-    os.environ.get("VOICE_TOOLS_OPENAI_BASE_URL")
-    or os.environ.get("OPENAI_BASE_URL")
-    or "https://api.openai.com/v1"
-)
-ASR_PROVIDER = os.environ.get("VOICEMATE_ASR_PROVIDER", "volcengine").strip().lower()
+REALTIME_TTS_PROVIDER = "volcengine"
+ASR_PROVIDER = "volcengine"
 VOLCENGINE_ASR_WS_URL = os.environ.get(
     "VOLCENGINE_ASR_WS_URL",
     "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async",
@@ -317,34 +305,18 @@ class VolcengineStreamingASRClient:
         return ""
 
 
-# ── Custom STT: Whisper ──────────────────────────────────────────────────────
+# Volcengine realtime STT
 
-class WhisperSTT(stt.STT):
-    """Speech-to-Text using Whisper (local faster-whisper or API)."""
+class VolcengineSTT(stt.STT):
+    """Speech-to-Text using Volcengine streaming ASR only."""
 
     def __init__(self):
         super().__init__(
             capabilities=stt.STTCapabilities(
-                streaming=ASR_PROVIDER == "volcengine",
-                interim_results=ASR_PROVIDER == "volcengine",
+                streaming=True,
+                interim_results=True,
             )
         )
-        self._local_model_size = ASR_MODEL
-        self._use_local_model = self._local_model_size.lower() not in {
-            "api",
-            "openai",
-            "remote",
-        }
-        self._local_model = None
-        self._client = None
-        if not self._use_local_model:
-            from openai import AsyncOpenAI
-            if not ASR_API_KEY:
-                logger.warning("Whisper API mode requested, but VOICE_TOOLS_OPENAI_KEY/OPENAI_API_KEY is not set.")
-            self._client = AsyncOpenAI(
-                api_key=ASR_API_KEY or "missing",
-                base_url=ASR_API_BASE_URL,
-            )
         self._speaker_profile: Optional[tuple[float, ...]] = None
         self._volc_asr = VolcengineStreamingASRClient()
         self.last_asr_latency_ms: Optional[float] = None
@@ -352,77 +324,13 @@ class WhisperSTT(stt.STT):
     def stream(self, *, language=None, conn_options=None) -> stt.RecognizeStream:
         from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS
 
-        if ASR_PROVIDER == "volcengine" and self._volc_asr.is_available:
-            return VolcengineRecognizeStream(
-                self,
-                conn_options=conn_options or DEFAULT_API_CONNECT_OPTIONS,
-                sample_rate=16000,
-            )
-        return super().stream(language=language, conn_options=conn_options or DEFAULT_API_CONNECT_OPTIONS)
-
-    def _model_ref(self) -> str:
-        if Path(self._local_model_size).exists():
-            return self._local_model_size
-
-        model_repo = os.environ.get("VOICEMATE_ASR_REPO", f"Systran/faster-whisper-{self._local_model_size}")
-        model_dir = Path(os.environ.get(
-            "VOICEMATE_ASR_MODEL_DIR",
-            str(Path(__file__).parent / "models" / f"faster-whisper-{self._local_model_size}"),
-        ))
-        if (model_dir / "model.bin").exists():
-            return str(model_dir)
-
-        try:
-            from huggingface_hub import snapshot_download
-            endpoint = os.environ.get("HF_ENDPOINT") or os.environ.get("VOICEMATE_HF_ENDPOINT")
-            logger.info("Downloading ASR model %s -> %s", model_repo, model_dir)
-            snapshot_download(
-                model_repo,
-                local_dir=str(model_dir),
-                endpoint=endpoint,
-                allow_patterns=[
-                    "config.json",
-                    "model.bin",
-                    "tokenizer.json",
-                    "vocabulary.*",
-                    "preprocessor_config.json",
-                ],
-                max_workers=4,
-            )
-            if (model_dir / "model.bin").exists():
-                return str(model_dir)
-        except Exception as e:
-            logger.error("ASR model download failed: %s", e)
-
-        return self._local_model_size
-
-    async def _load_local_model(self):
-        from faster_whisper import WhisperModel
-        import concurrent.futures
-        size = self._local_model_size or "base"
-        device = ASR_DEVICE
-        compute_type = ASR_COMPUTE_TYPE
-        with concurrent.futures.ThreadPoolExecutor() as pool:
-            try:
-                self._local_model = await asyncio.get_event_loop().run_in_executor(
-                    pool,
-                    lambda: WhisperModel(self._model_ref(), device=device, compute_type=compute_type),
-                )
-                logger.info("Loaded faster-whisper model: %s (%s/%s)", size, device, compute_type)
-            except Exception:
-                if device.lower() == "cpu":
-                    raise
-                logger.warning(
-                    "Failed to load faster-whisper on %s/%s; falling back to cpu/int8",
-                    device,
-                    compute_type,
-                    exc_info=True,
-                )
-                self._local_model = await asyncio.get_event_loop().run_in_executor(
-                    pool,
-                    lambda: WhisperModel(self._model_ref(), device="cpu", compute_type="int8"),
-                )
-                logger.info("Loaded faster-whisper model: %s (cpu/int8 fallback)", size)
+        if not self._volc_asr.is_available:
+            raise RuntimeError("Volcengine ASR credentials are not configured")
+        return VolcengineRecognizeStream(
+            self,
+            conn_options=conn_options or DEFAULT_API_CONNECT_OPTIONS,
+            sample_rate=16000,
+        )
 
     @staticmethod
     def _frame_to_mono_pcm(frame: rtc.AudioFrame) -> tuple[bytes, int, int]:
@@ -546,13 +454,12 @@ class WhisperSTT(stt.STT):
         try:
             wav_bytes, duration_seconds, rms, voice_features, sample_rate, channels, frame_count = self._audio_buffer_to_wav(buffer)
             logger.info(
-                "STT buffer: frames=%d sr=%d channels<=%d duration=%.2fs rms=%.1f model=%s",
+                "STT buffer: frames=%d sr=%d channels<=%d duration=%.2fs rms=%.1f provider=volcengine",
                 frame_count,
                 sample_rate,
                 channels,
                 duration_seconds,
                 rms,
-                self._local_model_size if self._use_local_model else "api",
             )
             if duration_seconds < ASR_MIN_AUDIO_SECONDS or rms < ASR_MIN_RMS:
                 logger.info(
@@ -578,98 +485,16 @@ class WhisperSTT(stt.STT):
                         alternatives=[],
                     )
 
-            text = ""
-            if ASR_PROVIDER == "volcengine" and self._volc_asr.is_available:
-                try:
-                    pcm_data = wav_bytes[44:] if wav_bytes.startswith(b"RIFF") else wav_bytes
-                    if sample_rate != 16000:
-                        import audioop
-                        pcm_data, _ = audioop.ratecv(pcm_data, 2, 1, sample_rate, 16000, None)
-                    text, latency_ms = await self._volc_asr.transcribe_pcm(pcm_data, sample_rate=16000)
-                    self.last_asr_latency_ms = latency_ms
-                    logger.info("Volcengine ASR: latency=%.0fms text=%s", latency_ms, text[:80])
-                except Exception as e:
-                    logger.warning("Volcengine ASR failed; falling back to local Whisper: %s", e)
+            if not self._volc_asr.is_available:
+                raise RuntimeError("Volcengine ASR credentials are not configured")
 
-            if text:
-                if _is_noise_text(text):
-                    logger.info("STT: empty transcription")
-                    return stt.SpeechEvent(
-                        type=stt.SpeechEventType.END_OF_SPEECH,
-                        alternatives=[],
-                    )
-                if SPEAKER_LOCK_ENABLED and duration_seconds >= SPEAKER_LOCK_MIN_SECONDS and rms >= SPEAKER_LOCK_MIN_RMS:
-                    self._update_speaker_profile(voice_features)
-                return stt.SpeechEvent(
-                    type=stt.SpeechEventType.FINAL_TRANSCRIPT,
-                    alternatives=[
-                        stt.SpeechData(
-                            language=lang,
-                            text=text,
-                            start_time=0.0,
-                            end_time=0.0,
-                            confidence=0.95,
-                        )
-                    ],
-                )
-
-            if self._use_local_model and self._local_model is None:
-                await self._load_local_model()
-
-            if self._local_model:
-                import concurrent.futures
-                temp_path = str(AUDIO_DIR / f"asr_{uuid.uuid4().hex[:8]}.wav")
-                try:
-                    with open(temp_path, "wb") as f:
-                        f.write(wav_bytes)
-                    with concurrent.futures.ThreadPoolExecutor() as pool:
-                        segments, _ = await asyncio.get_event_loop().run_in_executor(
-                            pool, lambda: self._local_model.transcribe(
-                                temp_path,
-                                language=lang,
-                                beam_size=int(os.environ.get("VOICEMATE_WHISPER_BEAM_SIZE", "3")),
-                                temperature=0.0,
-                                condition_on_previous_text=False,
-                                without_timestamps=True,
-                                vad_filter=True,
-                                vad_parameters={
-                                    "min_speech_duration_ms": int(os.environ.get("VOICEMATE_WHISPER_MIN_SPEECH_MS", "300")),
-                                    "min_silence_duration_ms": int(os.environ.get("VOICEMATE_WHISPER_MIN_SILENCE_MS", "520")),
-                                    "speech_pad_ms": int(os.environ.get("VOICEMATE_WHISPER_SPEECH_PAD_MS", "240")),
-                                },
-                            )
-                        )
-                    segment_list = list(segments)
-                    max_no_speech_prob = max(
-                        (getattr(seg, "no_speech_prob", 0.0) for seg in segment_list),
-                        default=0.0,
-                    )
-                    if max_no_speech_prob > ASR_MAX_NO_SPEECH_PROB:
-                        logger.info("STT rejected no-speech probability: %.2f", max_no_speech_prob)
-                        text = ""
-                    else:
-                        text = "".join(seg.text for seg in segment_list).strip()
-                except Exception as e:
-                    logger.warning(f"Local Whisper failed: {e}")
-                    text = ""
-                finally:
-                    if os.path.exists(temp_path):
-                        os.remove(temp_path)
-            else:
-                # API-based Whisper
-                try:
-                    if self._client is None:
-                        raise RuntimeError("Whisper API client is not configured")
-                    transcript = await self._client.audio.transcriptions.create(
-                        model="whisper-1",
-                        file=("audio.wav", wav_bytes, "audio/wav"),
-                        language=lang,
-                        response_format="text",
-                    )
-                    text = transcript.strip()
-                except Exception as e:
-                    logger.warning(f"Whisper API failed: {e}")
-                    text = ""
+            pcm_data = wav_bytes[44:] if wav_bytes.startswith(b"RIFF") else wav_bytes
+            if sample_rate != 16000:
+                import audioop
+                pcm_data, _ = audioop.ratecv(pcm_data, 2, 1, sample_rate, 16000, None)
+            text, latency_ms = await self._volc_asr.transcribe_pcm(pcm_data, sample_rate=16000)
+            self.last_asr_latency_ms = latency_ms
+            logger.info("Volcengine ASR: latency=%.0fms text=%s", latency_ms, text[:80])
 
             if not text or _is_noise_text(text):
                 logger.info("STT: empty transcription")
@@ -706,9 +531,9 @@ class WhisperSTT(stt.STT):
 # ── Custom LLM: DeepSeek ────────────────────────────────────────────────────
 
 class VolcengineRecognizeStream(stt.RecognizeStream):
-    def __init__(self, whisper_stt: WhisperSTT, *, conn_options, sample_rate: int = 16000):
-        super().__init__(stt=whisper_stt, conn_options=conn_options, sample_rate=sample_rate)
-        self._owner = whisper_stt
+    def __init__(self, volcengine_stt: VolcengineSTT, *, conn_options, sample_rate: int = 16000):
+        super().__init__(stt=volcengine_stt, conn_options=conn_options, sample_rate=sample_rate)
+        self._owner = volcengine_stt
 
     async def _run(self) -> None:
         import websockets
@@ -738,12 +563,22 @@ class VolcengineRecognizeStream(stt.RecognizeStream):
         sequence = 1
         latest_text = ""
         final_sent = False
+        start_sent = False
         flushed = False
+        latest_text_at = 0.0
         flush_grace_ms = int(os.environ.get("VOLCENGINE_ASR_FLUSH_GRACE_MS", "420"))
+        auto_final_ms = int(os.environ.get("VOLCENGINE_ASR_AUTO_FINAL_MS", "900"))
         ws = await client._connect(websockets, client.ws_url, client._headers())
         try:
             await ws.send(VolcengineAsrFunctionsV3.generate_asr_full_client_request(sequence, request, compression=True))
             sequence += 1
+
+            def emit_start_once() -> None:
+                nonlocal start_sent
+                if start_sent:
+                    return
+                start_sent = True
+                self._event_ch.send_nowait(stt.SpeechEvent(type=stt.SpeechEventType.START_OF_SPEECH))
 
             def emit_final_from_latest() -> None:
                 nonlocal final_sent
@@ -767,13 +602,15 @@ class VolcengineRecognizeStream(stt.RecognizeStream):
                 self._event_ch.send_nowait(stt.SpeechEvent(type=stt.SpeechEventType.END_OF_SPEECH))
 
             async def recv_loop():
-                nonlocal latest_text, final_sent
+                nonlocal latest_text, final_sent, latest_text_at
                 try:
                     async for raw in ws:
                         parsed = VolcengineAsrFunctionsV3.parse_response(raw)
                         text = client._extract_text(parsed)
                         if text and text != latest_text:
+                            emit_start_once()
                             latest_text = text
+                            latest_text_at = time.perf_counter()
                             event_type = (
                                 stt.SpeechEventType.FINAL_TRANSCRIPT
                                 if parsed.get("is_last_package")
@@ -800,8 +637,22 @@ class VolcengineRecognizeStream(stt.RecognizeStream):
                 except websockets.exceptions.ConnectionClosed:
                     emit_final_from_latest()
 
+            async def stable_text_watchdog():
+                while not final_sent:
+                    await asyncio.sleep(0.1)
+                    if (
+                        latest_text
+                        and latest_text_at > 0
+                        and (time.perf_counter() - latest_text_at) * 1000 >= auto_final_ms
+                    ):
+                        emit_final_from_latest()
+                        break
+
             recv_task = asyncio.create_task(recv_loop())
+            watchdog_task = asyncio.create_task(stable_text_watchdog())
             async for item in self._input_ch:
+                if final_sent:
+                    break
                 if isinstance(item, stt.RecognizeStream._FlushSentinel):
                     flushed = True
                     await ws.send(VolcengineAsrFunctionsV3.generate_asr_audio_only_request(sequence, b"", compress=False))
@@ -812,7 +663,7 @@ class VolcengineRecognizeStream(stt.RecognizeStream):
                         break
                     continue
 
-                mono_pcm, sample_rate, _channels = WhisperSTT._frame_to_mono_pcm(item)
+                mono_pcm, sample_rate, _channels = VolcengineSTT._frame_to_mono_pcm(item)
                 if not mono_pcm:
                     continue
                 if sample_rate != 16000:
@@ -825,12 +676,22 @@ class VolcengineRecognizeStream(stt.RecognizeStream):
                 await ws.send(VolcengineAsrFunctionsV3.generate_asr_audio_only_request(sequence, b"", compress=False))
             if final_sent:
                 recv_task.cancel()
+                watchdog_task.cancel()
                 try:
                     await recv_task
                 except asyncio.CancelledError:
                     pass
+                try:
+                    await watchdog_task
+                except asyncio.CancelledError:
+                    pass
             else:
                 await recv_task
+                watchdog_task.cancel()
+                try:
+                    await watchdog_task
+                except asyncio.CancelledError:
+                    pass
             emit_final_from_latest()
         finally:
             await ws.close()
@@ -942,146 +803,6 @@ class DeepSeekLLMStream(llm.LLMStream):
                 id=str(uuid.uuid4()),
                 delta=llm.ChoiceDelta(role="assistant", content="嗯，我听到你了。不过我现在有点卡，能再说一遍吗？"),
             ))
-
-
-class EdgeTTS(tts.TTS):
-    """Text-to-Speech using edge-tts (Microsoft Edge neural voices)."""
-
-    def __init__(self):
-        super().__init__(
-            capabilities=tts.TTSCapabilities(streaming=False),
-            sample_rate=24000,
-            num_channels=1,
-        )
-        self._voice = TTS_VOICE
-
-    @property
-    def provider(self) -> str:
-        return "edge-tts"
-
-    def synthesize(self, text: str, **kwargs) -> tts.ChunkedStream:
-        return EdgeTTSChunkedStream(self, text, conn_options=kwargs.get("conn_options"))
-
-
-class EdgeTTSChunkedStream(tts.ChunkedStream):
-    """Produces PCM audio frames from edge-tts, with Windows SAPI fallback."""
-
-    def __init__(self, edge_tts_obj: EdgeTTS, text: str, conn_options=None):
-        from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS
-        super().__init__(
-            tts=edge_tts_obj,
-            input_text=text,
-            conn_options=conn_options or DEFAULT_API_CONNECT_OPTIONS,
-        )
-        self._tts = edge_tts_obj
-        self._text = text
-
-    async def _decode_to_pcm(self, input_bytes: bytes, input_format: str) -> bytes:
-        proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-y", "-f", input_format, "-i", "pipe:0",
-            "-f", "s16le", "-acodec", "pcm_s16le",
-            "-ar", "24000", "-ac", "1",
-            "pipe:1",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        pcm_data, stderr = await proc.communicate(input=input_bytes)
-        if proc.returncode != 0:
-            logger.error("ffmpeg decode failed: %s", stderr.decode(errors="replace")[:200])
-            return b""
-        return pcm_data
-
-    async def _edge_pcm(self, text: str, emotion: str) -> bytes:
-        import edge_tts
-        profile = EMOTION_TTS_PROFILES.get(emotion, EMOTION_TTS_PROFILES["gentle"])
-        effective_voice = resolve_edge_voice(self._tts._voice, emotion)
-        communicate = edge_tts.Communicate(
-            text,
-            effective_voice,
-            rate=profile.get("rate", "+0%"),
-            pitch=profile.get("pitch", "+0Hz"),
-        )
-        mp3_buffer = bytearray()
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                mp3_buffer.extend(chunk["data"])
-        if not mp3_buffer:
-            return b""
-        return await self._decode_to_pcm(bytes(mp3_buffer), "mp3")
-
-    async def _sapi_pcm(self, text: str) -> bytes:
-        import tempfile
-        import shlex
-        wav_path = Path(tempfile.gettempdir()) / f"voicemate_sapi_{uuid.uuid4().hex}.wav"
-        txt_path = Path(tempfile.gettempdir()) / f"voicemate_sapi_{uuid.uuid4().hex}.txt"
-        try:
-            txt_path.write_text(text, encoding="utf-8")
-            ps = (
-                "Add-Type -AssemblyName System.Speech; "
-                f"$t = Get-Content -LiteralPath {shlex.quote(str(txt_path))} -Raw -Encoding UTF8; "
-                "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
-                f"$s.SetOutputToWaveFile({shlex.quote(str(wav_path))}); "
-                "$s.Speak($t); $s.Dispose()"
-            )
-            proc = await asyncio.create_subprocess_exec(
-                "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _stdout, stderr = await proc.communicate()
-            if proc.returncode != 0 or not wav_path.exists():
-                logger.error("Windows SAPI fallback failed: %s", stderr.decode(errors="replace")[:200])
-                return b""
-            return await self._decode_to_pcm(wav_path.read_bytes(), "wav")
-        finally:
-            for path in (wav_path, txt_path):
-                try:
-                    path.unlink(missing_ok=True)
-                except Exception:
-                    pass
-
-    async def _run(self, emitter: tts.AudioEmitter) -> None:
-        emotion = detect_emotion(self._text)
-        text = prepare_tts_text(strip_markdown(self._text), emotion)
-        if not text:
-            text = "嗯。"
-
-        pcm_data = b""
-        try:
-            pcm_data = await self._edge_pcm(text, emotion)
-        except Exception as e:
-            logger.error("edge-tts synthesis error: %s", e)
-
-        if not pcm_data:
-            logger.warning("edge-tts produced no audio; using Windows SAPI fallback")
-            try:
-                pcm_data = await self._sapi_pcm(text)
-            except Exception as e:
-                logger.error("Windows SAPI synthesis error: %s", e)
-
-        if not pcm_data:
-            pcm_data = b"\x00" * 1920 * 5
-
-        request_id = str(uuid.uuid4())
-        emitter.initialize(
-            request_id=request_id,
-            sample_rate=24000,
-            num_channels=1,
-            mime_type="audio/pcm",
-        )
-
-        frame_size = 1920
-        offset = 0
-        while offset < len(pcm_data):
-            end = min(offset + frame_size, len(pcm_data))
-            chunk = pcm_data[offset:end]
-            if len(chunk) < frame_size:
-                chunk += b"\x00" * (frame_size - len(chunk))
-            emitter.push(chunk)
-            offset = end
-
-        emitter.flush()
 
 
 class VolcengineLiveTTS(tts.TTS):
@@ -1324,7 +1045,7 @@ class VolcengineLiveTTSStream(tts.SynthesizeStream):
 
 
 class SilentLiveTTS(tts.TTS):
-    """No-voice fallback when cloud TTS is unavailable."""
+    """Safety output when Volcengine TTS credentials are unavailable."""
 
     def __init__(self):
         super().__init__(
@@ -1361,89 +1082,10 @@ class SilentLiveTTSChunkedStream(tts.ChunkedStream):
         emitter.flush()
 
 
-class MiMoLiveTTS(tts.TTS):
-    """LiveKit TTS adapter for Xiaomi MiMo V2.5 TTS."""
-
-    def __init__(self):
-        super().__init__(
-            capabilities=tts.TTSCapabilities(streaming=False),
-            sample_rate=24000,
-            num_channels=1,
-        )
-        self._mimo = MiMoTTS()
-
-    @property
-    def provider(self) -> str:
-        return "xiaomi-mimo"
-
-    @property
-    def is_available(self) -> bool:
-        return self._mimo.is_available
-
-    def synthesize(self, text: str, **kwargs) -> tts.ChunkedStream:
-        return MiMoLiveTTSChunkedStream(self, text)
-
-
-class MiMoLiveTTSChunkedStream(tts.ChunkedStream):
-    """Generates MiMo WAV, decodes to PCM, then pushes 20 ms LiveKit frames."""
-
-    def __init__(self, mimo_tts_obj: MiMoLiveTTS, text: str):
-        from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS
-        super().__init__(
-            tts=mimo_tts_obj,
-            input_text=text,
-            conn_options=DEFAULT_API_CONNECT_OPTIONS,
-        )
-        self._tts = mimo_tts_obj
-        self._text = text
-
-    async def _run(self, emitter: tts.AudioEmitter) -> None:
-        emotion = detect_emotion(self._text)
-        text = strip_markdown(self._text)
-
-        try:
-            audio_path, _duration_ms = await self._tts._mimo.synthesize(text, emotion=emotion)
-            proc = await asyncio.create_subprocess_exec(
-                "ffmpeg", "-y", "-i", audio_path,
-                "-f", "s16le", "-acodec", "pcm_s16le",
-                "-ar", "24000", "-ac", "1",
-                "pipe:1",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            pcm_data, stderr = await proc.communicate()
-            if proc.returncode != 0:
-                logger.error(f"ffmpeg decode failed: {stderr.decode(errors='replace')[:200]}")
-                return
-            if not pcm_data or len(pcm_data) < 960:
-                return
-
-            emitter.initialize(
-                request_id=str(uuid.uuid4()),
-                sample_rate=24000,
-                num_channels=1,
-                mime_type="audio/pcm",
-            )
-
-            frame_size = 1920
-            offset = 0
-            while offset < len(pcm_data):
-                end = min(offset + frame_size, len(pcm_data))
-                chunk = pcm_data[offset:end]
-                if len(chunk) < frame_size:
-                    chunk += b'\x00' * (frame_size - len(chunk))
-                emitter.push(chunk)
-                offset = end
-
-            emitter.flush()
-        except Exception as e:
-            logger.error(f"MiMo TTS synthesis error: {e}")
-
-
 class VoiceMateAgent(Agent):
     """VoiceMate Voice AI Agent for LiveKit.
 
-    Pipeline: VAD → Volcengine/Whisper STT → DeepSeekLLM → Volcengine TTS
+    Pipeline: VAD → Volcengine streaming ASR → DeepSeekLLM → Volcengine TTS
     Supports barge-in natively through allow_interruptions=True.
     Persona configurable via room metadata.
     """
@@ -1469,24 +1111,13 @@ class VoiceMateAgent(Agent):
             mode="realtime",
         )
 
-        self._whisper_stt = WhisperSTT()
+        self._volcengine_stt = VolcengineSTT()
         self._deepseek_llm = DeepSeekLLM()
         self._volc_tts = VolcengineLiveTTS()
         self._silent_tts = SilentLiveTTS()
-        self._mimo_tts = MiMoLiveTTS()
         self._active_tts = self._volc_tts if self._volc_tts.is_available else self._silent_tts
-        if REALTIME_TTS_PROVIDER == "volcengine":
-            if self._volc_tts.is_available:
-                self._active_tts = self._volc_tts
-            else:
-                logger.error("VOICEMATE_REALTIME_TTS_PROVIDER=volcengine but credentials are not configured")
-                self._active_tts = self._silent_tts
-        elif REALTIME_TTS_PROVIDER == "mimo":
-            if self._mimo_tts.is_available:
-                self._active_tts = self._mimo_tts
-            else:
-                logger.warning("VOICEMATE_REALTIME_TTS_PROVIDER=mimo but MIMO_API_KEY is not configured; using silent fallback")
-                self._active_tts = self._silent_tts
+        if not self._volc_tts.is_available:
+            logger.error("Volcengine realtime TTS credentials are not configured; using silent safety output")
 
         logger.info(
             f"VoiceMateAgent init (persona={self._persona}, "
@@ -1495,7 +1126,7 @@ class VoiceMateAgent(Agent):
 
         super().__init__(
             instructions=instructions,
-            stt=self._whisper_stt,
+            stt=self._volcengine_stt,
             vad=silero.VAD.load(
                 min_speech_duration=float(os.environ.get("VOICEMATE_SILERO_MIN_SPEECH_SECONDS", "0.12")),
                 min_silence_duration=float(os.environ.get("VOICEMATE_SILERO_MIN_SILENCE_SECONDS", "0.38")),
@@ -1505,6 +1136,7 @@ class VoiceMateAgent(Agent):
             llm=self._deepseek_llm,
             tts=self._active_tts,
             allow_interruptions=True,       # Barge-in
+            turn_detection=os.environ.get("VOICEMATE_TURN_DETECTION", "stt").strip().lower(),
             min_endpointing_delay=float(os.environ.get("VOICEMATE_MIN_ENDPOINTING_DELAY", "0.35")),
             max_endpointing_delay=float(os.environ.get("VOICEMATE_MAX_ENDPOINTING_DELAY", "0.85")),
             min_consecutive_speech_delay=float(os.environ.get("VOICEMATE_MIN_CONSECUTIVE_SPEECH_DELAY", "0.25")),
@@ -1550,8 +1182,8 @@ class VoiceMateAgent(Agent):
                 intensity=self._last_analysis.intensity,
                 need=self._last_analysis.need,
             )
-            if self._whisper_stt.last_asr_latency_ms is not None:
-                await self._publish_call_event("metrics", label="ASR", value_ms=self._whisper_stt.last_asr_latency_ms)
+            if self._volcengine_stt.last_asr_latency_ms is not None:
+                await self._publish_call_event("metrics", label="ASR", value_ms=self._volcengine_stt.last_asr_latency_ms)
             await self._publish_call_event("call_state", state="thinking")
 
     async def llm_node(
@@ -1656,7 +1288,7 @@ def main():
     if not DEEPSEEK_API_KEY:
         logger.warning(
             "DEEPSEEK_API_KEY not set. The LiveKit agent can start, "
-            "but LLM calls will use the error fallback until a key is configured."
+            "but LLM calls will use a local error reply until a key is configured."
         )
 
     if not LIVEKIT_URL or not LIVEKIT_API_KEY or not LIVEKIT_API_SECRET:
@@ -1665,7 +1297,11 @@ def main():
     logger.info("Starting VoiceMate LiveKit Agent")
     logger.info(f"  LiveKit: {LIVEKIT_URL}")
     logger.info(f"  DeepSeek: {DEEPSEEK_MODEL}")
-    logger.info(f"  TTS Voice: {TTS_VOICE}")
+    logger.info("  Chat TTS provider: volcengine")
+    logger.info("  Realtime TTS provider: %s", REALTIME_TTS_PROVIDER)
+    logger.info("  Volcengine voice: %s", os.environ.get("VOLCENGINE_TTS_VOICE_TYPE", "not configured"))
+    logger.info("  ASR provider: %s", ASR_PROVIDER)
+    logger.info("  Turn detection: %s", os.environ.get("VOICEMATE_TURN_DETECTION", "stt"))
     logger.info(f"  Persona: {DEFAULT_PERSONA}")
     logger.info(f"  Barge-in: enabled")
     if os.environ.get("VOICEMATE_PREWARM_TTS_ACKS", "1").lower() not in {"0", "false", "no"}:

@@ -4,7 +4,6 @@ python-multipart>=0.0.20,<1
 pydantic>=2.10,<3
 python-dotenv>=1.0,<2
 aiohttp>=3.9,<4
-edge-tts>=7.0,<8
 openai>=1.0,<3
 volcengine-audio>=0.2.2,<0.3
 livekit-api>=1.0,<2
@@ -15,7 +14,6 @@ webrtcvad-wheels>=2.0.10,<3; platform_system == "Windows"
 webrtcvad>=2.0.10,<3; platform_system != "Windows"
 numpy>=1.26,<3
 soundfile>=0.12,<1
-faster-whisper>=1.0,<2
 
 # Optional but recommended for local high-quality TTS.
 # Install manually when the machine has a compatible Python/CUDA setup:
