@@ -84,6 +84,8 @@ from server import (
     is_semantically_incomplete,
     AUDIO_DIR,
     VolcengineTTSClient,
+    companion_orchestrator,
+    history_store,
     logger as voicemate_logger,
 )
 
@@ -853,6 +855,44 @@ class VolcengineLiveTTSChunkedStream(tts.ChunkedStream):
         emitter.flush()
 
 
+class SilentLiveTTS(tts.TTS):
+    """No-voice fallback when cloud TTS is unavailable."""
+
+    def __init__(self):
+        super().__init__(
+            capabilities=tts.TTSCapabilities(streaming=False),
+            sample_rate=24000,
+            num_channels=1,
+        )
+
+    @property
+    def provider(self) -> str:
+        return "silent"
+
+    def synthesize(self, text: str, **kwargs) -> tts.ChunkedStream:
+        return SilentLiveTTSChunkedStream(self, text)
+
+
+class SilentLiveTTSChunkedStream(tts.ChunkedStream):
+    def __init__(self, silent_tts_obj: SilentLiveTTS, text: str):
+        from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS
+        super().__init__(
+            tts=silent_tts_obj,
+            input_text=text,
+            conn_options=DEFAULT_API_CONNECT_OPTIONS,
+        )
+
+    async def _run(self, emitter: tts.AudioEmitter) -> None:
+        emitter.initialize(
+            request_id=str(uuid.uuid4()),
+            sample_rate=24000,
+            num_channels=1,
+            mime_type="audio/pcm",
+        )
+        emitter.push(b"\x00" * 1920)
+        emitter.flush()
+
+
 class MiMoLiveTTS(tts.TTS):
     """LiveKit TTS adapter for Xiaomi MiMo V2.5 TTS."""
 
@@ -952,25 +992,33 @@ class VoiceMateAgent(Agent):
         self._voice = room_metadata.get("voice", TTS_VOICE)
         self._conv_id = str(uuid.uuid4())[:8]
         self._ctx = ctx
+        self._last_user_text = ""
 
-        instructions = PERSONAS.get(self._persona, PERSONAS[DEFAULT_PERSONA])
+        instructions = companion_orchestrator.system_prompt(
+            self._persona,
+            self._conv_id,
+            mode="realtime",
+        )
 
         self._whisper_stt = WhisperSTT()
         self._deepseek_llm = DeepSeekLLM()
         self._edge_tts = EdgeTTS()
         self._volc_tts = VolcengineLiveTTS()
+        self._silent_tts = SilentLiveTTS()
         self._mimo_tts = MiMoLiveTTS()
-        self._active_tts = self._edge_tts
+        self._active_tts = self._volc_tts if self._volc_tts.is_available else self._silent_tts
         if REALTIME_TTS_PROVIDER == "volcengine":
             if self._volc_tts.is_available:
                 self._active_tts = self._volc_tts
             else:
-                logger.warning("VOICEMATE_REALTIME_TTS_PROVIDER=volcengine but credentials are not configured; using edge-tts")
+                logger.error("VOICEMATE_REALTIME_TTS_PROVIDER=volcengine but credentials are not configured")
+                self._active_tts = self._silent_tts
         elif REALTIME_TTS_PROVIDER == "mimo":
             if self._mimo_tts.is_available:
                 self._active_tts = self._mimo_tts
             else:
-                logger.warning("VOICEMATE_REALTIME_TTS_PROVIDER=mimo but MIMO_API_KEY is not configured; using edge-tts")
+                logger.warning("VOICEMATE_REALTIME_TTS_PROVIDER=mimo but MIMO_API_KEY is not configured; using silent fallback")
+                self._active_tts = self._silent_tts
 
         logger.info(
             f"VoiceMateAgent init (persona={self._persona}, "
@@ -1021,6 +1069,7 @@ class VoiceMateAgent(Agent):
         logger.info(f"User turn: {user_text[:80]} [{self._conv_id}]")
         user_text = user_text.strip()
         if user_text:
+            self._last_user_text = user_text
             await self._publish_call_event("user_transcript", text=user_text, is_final=True)
 
     async def llm_node(
@@ -1029,6 +1078,18 @@ class VoiceMateAgent(Agent):
         tools: list[llm.Tool],
         model_settings,
     ) -> AsyncGenerator[llm.ChatChunk, None]:
+        if self._last_user_text:
+            try:
+                system_text = companion_orchestrator.system_prompt(
+                    self._persona,
+                    self._conv_id,
+                    mode="realtime",
+                    user_text=self._last_user_text,
+                )
+                chat_ctx.add_message(role="system", content=system_text)
+            except Exception as e:
+                logger.warning("Failed to inject orchestrator prompt: %s", e)
+
         tool_choice = getattr(model_settings, "tool_choice", None)
         stream = self._deepseek_llm.chat(
             chat_ctx=chat_ctx,
@@ -1043,6 +1104,13 @@ class VoiceMateAgent(Agent):
                 yield chunk
         reply = "".join(full_text).strip()
         if reply:
+            if self._last_user_text:
+                history_store.append(self._conv_id, self._last_user_text, reply)
+                companion_orchestrator.record_turn(
+                    conversation_id=self._conv_id,
+                    user_text=self._last_user_text,
+                    assistant_text=reply,
+                )
             await self._publish_call_event("ai_turn_complete", text=reply)
 
 

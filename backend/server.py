@@ -28,13 +28,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
+from orchestrator import CompanionOrchestrator
+
 load_dotenv()
 
 ROOT = Path(__file__).resolve().parent
 AUDIO_DIR = ROOT / "audio_cache"
 HISTORY_DIR = ROOT / "history"
+MEMORY_DIR = ROOT / "memory"
 CLONE_DB_PATH = ROOT / "voice_clones.json"
-for folder in (AUDIO_DIR, HISTORY_DIR):
+for folder in (AUDIO_DIR, HISTORY_DIR, MEMORY_DIR):
     folder.mkdir(parents=True, exist_ok=True)
 
 HOST = os.environ.get("VOICEMATE_HOST", "0.0.0.0")
@@ -225,6 +228,7 @@ class ConversationStore:
 
 
 history_store = ConversationStore(HISTORY_DIR)
+companion_orchestrator = CompanionOrchestrator(MEMORY_DIR)
 
 
 def clean_text(text: str) -> str:
@@ -267,6 +271,8 @@ def normalize_voice(voice: Optional[str]) -> str:
         return DEFAULT_VOICE
     if voice.startswith("fish_") or voice.startswith("mimo_"):
         return DEFAULT_VOICE
+    if "_" in voice and not voice.endswith("Neural"):
+        return DEFAULT_VOICE
     return voice
 
 
@@ -291,7 +297,6 @@ class LLMClient:
         self.api_key = DEEPSEEK_API_KEY
 
     async def reply(self, text: str, conversation_id: str, persona: str) -> str:
-        prompt = PERSONAS.get(persona, PERSONAS[DEFAULT_PERSONA])
         history = history_store.load(conversation_id)
         if not self.api_key:
             return f"我听到了：{text}。现在后端还没配置大模型 Key，所以我先用本地回复陪你。"
@@ -300,9 +305,13 @@ class LLMClient:
             from openai import AsyncOpenAI
 
             client = AsyncOpenAI(api_key=self.api_key, base_url=DEEPSEEK_BASE_URL)
-            messages: list[dict[str, str]] = [{"role": "system", "content": prompt}]
-            messages.extend(history[-12:])
-            messages.append({"role": "user", "content": text})
+            messages = companion_orchestrator.build_messages(
+                user_text=text,
+                conversation_id=conversation_id,
+                persona=persona,
+                history=history,
+                mode="chat",
+            )
             response = await client.chat.completions.create(
                 model=DEEPSEEK_MODEL,
                 messages=messages,
@@ -455,7 +464,8 @@ class TTSEngine:
                 )
                 return output, max(650, int(len(text) / 5.2 * 1000))
             except Exception:
-                logger.exception("volcengine tts failed, falling back to edge-tts")
+                logger.exception("volcengine tts failed")
+                raise
 
         communicate = edge_tts.Communicate(
             text=text,
@@ -511,12 +521,17 @@ async def chat(request: ChatRequest):
     emotion = detect_emotion(reply)
     audio_path, duration_ms = await tts.synthesize(reply, request.voice, request.speed)
     history_store.append(conversation_id, text, reply)
+    analysis = companion_orchestrator.record_turn(
+        conversation_id=conversation_id,
+        user_text=text,
+        assistant_text=reply,
+    )
     return ChatResponse(
         reply_text=reply,
         audio_url=audio_url(audio_path),
         conversation_id=conversation_id,
         duration_ms=duration_ms,
-        emotion=emotion,
+        emotion=analysis.emotion if analysis.emotion != "neutral" else emotion,
     )
 
 

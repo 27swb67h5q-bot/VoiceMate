@@ -62,6 +62,8 @@ struct RealtimeCallView: View {
                     .padding(.horizontal, 28)
             }
 
+            transcriptPreview
+
             Spacer()
 
             Button {
@@ -86,6 +88,34 @@ struct RealtimeCallView: View {
             UIApplication.shared.isIdleTimerDisabled = false
             service.endCall()
         }
+    }
+
+    private var transcriptPreview: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(Array(service.transcript.suffix(4).enumerated()), id: \.offset) { _, item in
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: item.isUser ? "person.fill" : "sparkles")
+                        .font(.caption)
+                        .foregroundStyle(item.isUser ? .white.opacity(0.64) : .green.opacity(0.9))
+                        .frame(width: 18)
+                    Text(item.text)
+                        .font(.footnote)
+                        .foregroundStyle(.white.opacity(item.isUser ? 0.72 : 0.92))
+                        .lineLimit(2)
+                    Spacer(minLength: 0)
+                }
+            }
+
+            if service.transcript.isEmpty {
+                Text("我会把听到的话和回应同步到聊天里")
+                    .font(.footnote)
+                    .foregroundStyle(.white.opacity(0.56))
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+        .padding(.horizontal, 22)
     }
 
     private func format(_ duration: TimeInterval) -> String {

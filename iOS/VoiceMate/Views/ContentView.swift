@@ -11,11 +11,13 @@ struct ContentView: View {
     @State private var showSettings = false
     @State private var showRealtimeCall = false
     @State private var showClone = false
+    @State private var companionState = "在听"
     @FocusState private var inputFocused: Bool
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
+                companionStatusBar
                 messageList
                 composer
             }
@@ -66,6 +68,30 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    private var companionStatusBar: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(service.isBusy ? Color.green : Color.secondary.opacity(0.45))
+                .frame(width: 8, height: 8)
+            Text(service.isBusy ? "正在想怎么回应你" : companionState)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button {
+                showRealtimeCall = true
+                inputFocused = false
+            } label: {
+                Label("通话", systemImage: "phone.fill")
+                    .font(.footnote.weight(.medium))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.green)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(Color(red: 0.97, green: 0.97, blue: 0.98))
     }
 
     private var messageList: some View {
@@ -181,6 +207,7 @@ struct ContentView: View {
             do {
                 let response = try await service.sendMessage(text, conversationId: conversationId)
                 conversationId = response.conversationId
+                companionState = companionLabel(response.emotion)
                 let assistant = ChatMessage(role: .assistant, text: response.replyText, audioURL: response.audioUrl)
                 messages.append(assistant)
                 try? await service.playAudio(path: response.audioUrl)
@@ -203,7 +230,25 @@ struct ContentView: View {
     private func appendTurn(isUser: Bool, text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        if !isUser {
+            companionState = "刚刚回应过你"
+        }
         messages.append(ChatMessage(role: isUser ? .user : .assistant, text: trimmed))
+    }
+
+    private func companionLabel(_ emotion: String?) -> String {
+        switch emotion {
+        case "comforting":
+            return "听起来你有点累，我会放轻一点"
+        case "cheerful":
+            return "被你的开心带起来了"
+        case "curious":
+            return "在认真接你的问题"
+        case "focused":
+            return "进入解决问题模式"
+        default:
+            return "在听"
+        }
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy) {
