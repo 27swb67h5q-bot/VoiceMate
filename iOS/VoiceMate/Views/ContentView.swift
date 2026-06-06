@@ -143,6 +143,9 @@ struct ContentView: View {
 
                 TextField("输入消息", text: $inputText)
                     .lineLimit(1)
+                    .keyboardType(.default)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled(false)
                     .textFieldStyle(.plain)
                     .focused($inputFocused)
                     .padding(.horizontal, 12)
@@ -311,7 +314,6 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
 
     private let voices = [
-        "zh_female_wanqudashu_moon_bigtts": "火山女声",
         "zh_female_qingxinnvsheng_mars_bigtts": "清新女声",
         "zh_female_tianmeixiaoyuan_moon_bigtts": "甜美女声",
         "zh_female_gaolengyujie_moon_bigtts": "冷静女声",

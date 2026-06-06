@@ -41,7 +41,7 @@ LIVEKIT_API_SECRET=
 VOLCENGINE_TTS_API_KEY=
 VOLCENGINE_TTS_RESOURCE_ID=volc.service_type.10029
 VOLCENGINE_TTS_WS_URL=wss://openspeech.bytedance.com/api/v3/tts/bidirection
-VOLCENGINE_TTS_VOICE_TYPE=zh_female_wanqudashu_moon_bigtts
+VOLCENGINE_TTS_VOICE_TYPE=zh_female_qingxinnvsheng_mars_bigtts
 ```
 
 On Windows, use:

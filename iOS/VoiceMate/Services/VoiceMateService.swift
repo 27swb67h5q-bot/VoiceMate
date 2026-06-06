@@ -3,6 +3,13 @@ import Foundation
 
 @MainActor
 final class VoiceMateService: NSObject, ObservableObject {
+    static let defaultFemaleVoice = "zh_female_qingxinnvsheng_mars_bigtts"
+    private static let supportedFemaleVoices: Set<String> = [
+        "zh_female_qingxinnvsheng_mars_bigtts",
+        "zh_female_tianmeixiaoyuan_moon_bigtts",
+        "zh_female_gaolengyujie_moon_bigtts"
+    ]
+
     @Published var serverHost: String {
         didSet { UserDefaults.standard.set(serverHost, forKey: "server_host") }
     }
@@ -44,7 +51,7 @@ final class VoiceMateService: NSObject, ObservableObject {
     }
 
     private static func normalizedVoice(_ voice: String?) -> String {
-        guard let voice, voice.hasPrefix("zh_female_") else { return "zh_female_wanqudashu_moon_bigtts" }
+        guard let voice, supportedFemaleVoices.contains(voice) else { return defaultFemaleVoice }
         return voice
     }
 

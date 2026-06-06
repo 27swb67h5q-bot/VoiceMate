@@ -48,7 +48,8 @@ DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 
-DEFAULT_VOICE = os.environ.get("VOICEMATE_TTS_VOICE", "zh_female_wanqudashu_moon_bigtts")
+VOLCENGINE_TTS_DEFAULT_VOICE = "zh_female_qingxinnvsheng_mars_bigtts"
+DEFAULT_VOICE = os.environ.get("VOICEMATE_TTS_VOICE", VOLCENGINE_TTS_DEFAULT_VOICE)
 TTS_VOICE = DEFAULT_VOICE
 DEFAULT_PERSONA = os.environ.get("VOICEMATE_DEFAULT_PERSONA", "love")
 
@@ -57,10 +58,9 @@ VOLCENGINE_TTS_APP_ID = os.environ.get("VOLCENGINE_TTS_APP_ID", os.environ.get("
 VOLCENGINE_TTS_ACCESS_KEY = os.environ.get("VOLCENGINE_TTS_ACCESS_KEY", os.environ.get("VOLC_TOKEN", ""))
 VOLCENGINE_TTS_RESOURCE_ID = os.environ.get("VOLCENGINE_TTS_RESOURCE_ID", "volc.service_type.10029")
 VOLCENGINE_TTS_WS_URL = os.environ.get("VOLCENGINE_TTS_WS_URL", "wss://openspeech.bytedance.com/api/v3/tts/bidirection")
-VOLCENGINE_TTS_VOICE_TYPE = os.environ.get("VOLCENGINE_TTS_VOICE_TYPE", "zh_female_wanqudashu_moon_bigtts")
+VOLCENGINE_TTS_VOICE_TYPE = os.environ.get("VOLCENGINE_TTS_VOICE_TYPE", VOLCENGINE_TTS_DEFAULT_VOICE)
 VOLCENGINE_TTS_MODEL = os.environ.get("VOLCENGINE_TTS_MODEL", "seed-tts-2.0-expressive")
 VOLCENGINE_TTS_FEMALE_VOICES = {
-    "zh_female_wanqudashu_moon_bigtts",
     "zh_female_qingxinnvsheng_mars_bigtts",
     "zh_female_tianmeixiaoyuan_moon_bigtts",
     "zh_female_gaolengyujie_moon_bigtts",
@@ -280,6 +280,8 @@ def normalize_volcengine_voice(voice: Optional[str]) -> str:
         return VOLCENGINE_TTS_VOICE_TYPE
     if voice.startswith("volc:"):
         return voice.removeprefix("volc:")
+    if voice == "zh_female_wanqudashu_moon_bigtts":
+        return VOLCENGINE_TTS_DEFAULT_VOICE
     if "_" not in voice:
         return VOLCENGINE_TTS_VOICE_TYPE
     if voice.startswith("zh_female_") and voice in VOLCENGINE_TTS_FEMALE_VOICES:
