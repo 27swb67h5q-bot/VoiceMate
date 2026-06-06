@@ -13,6 +13,7 @@ final class LiveKitCallService: NSObject, ObservableObject {
     @Published var transcript: [(isUser: Bool, text: String)] = []
     @Published var metricsText: String?
     @Published var emotionText: String?
+    @Published var audioEmotionText: String?
 
     private let serverHost: String
     private let serverPort: String
@@ -100,7 +101,8 @@ final class LiveKitCallService: NSObject, ObservableObject {
             mode: .voiceChat,
             options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP]
         )
-        try session.setPreferredIOBufferDuration(0.01)
+        try session.setPreferredSampleRate(48_000)
+        try session.setPreferredIOBufferDuration(0.005)
         try session.setActive(true)
     }
 
@@ -164,6 +166,11 @@ final class LiveKitCallService: NSObject, ObservableObject {
                 if let label = object["label"] as? String {
                     self.emotionText = label
                     self.statusText = label
+                }
+            case "audio_emotion":
+                if let emotion = object["emotion"] as? String,
+                   let confidence = object["confidence"] as? Double {
+                    self.audioEmotionText = "语音情绪 \(emotion) \(Int(confidence * 100))%"
                 }
             case "ai_turn_complete":
                 self.isAISpeaking = false

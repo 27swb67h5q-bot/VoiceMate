@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from rag_memory import LocalRAGMemory
+
 
 @dataclass
 class TurnAnalysis:
@@ -117,6 +119,18 @@ EMOTION_LEXICON: dict[str, tuple[str, ...]] = {
     "focused": ("怎么办", "怎么做", "帮我", "修复", "方案", "检查", "优化", "构建", "报错"),
 }
 
+
+EMOTION_LEXICON.update(
+    {
+        "anxious": EMOTION_LEXICON.get("anxious", ()) + ("焦虑", "慌", "害怕", "担心", "心烦", "紧张", "压力", "睡不着", "喘不过气"),
+        "comforting": EMOTION_LEXICON.get("comforting", ()) + ("累", "崩溃", "难受", "不开心", "委屈", "想哭", "撑不住", "痛苦", "失落"),
+        "lonely": EMOTION_LEXICON.get("lonely", ()) + ("孤独", "没人陪", "一个人", "空落落", "没人懂", "好冷清"),
+        "angry": EMOTION_LEXICON.get("angry", ()) + ("生气", "气死", "火大", "烦死", "讨厌", "不爽", "凭什么"),
+        "cheerful": EMOTION_LEXICON.get("cheerful", ()) + ("开心", "哈哈", "好玩", "舒服", "喜欢", "太好了", "高兴"),
+        "affectionate": EMOTION_LEXICON.get("affectionate", ()) + ("想你", "抱抱", "陪我", "喜欢你", "爱你", "贴贴", "亲亲"),
+        "focused": EMOTION_LEXICON.get("focused", ()) + ("怎么弄", "怎么做", "帮我", "修复", "方案", "检查", "优化", "构建", "报错", "记一下"),
+    }
+)
 
 INTENSIFIERS = ("特别", "非常", "真的", "太", "快", "一直", "完全", "超级", "有点", "好")
 
@@ -305,6 +319,7 @@ class CompanionMemoryStore:
 class CompanionOrchestrator:
     def __init__(self, root: Path):
         self.memory = CompanionMemoryStore(root)
+        self.rag = LocalRAGMemory(root)
 
     def analyze(self, text: str) -> TurnAnalysis:
         compact = text.strip()
@@ -362,6 +377,8 @@ class CompanionOrchestrator:
         policy = PERSONA_POLICIES.get(persona, PERSONA_POLICIES["love"])
         analysis = self.analyze(user_text) if user_text else self.analyze("")
         memory = self.memory.render(conversation_id)
+        rag_memory = self.rag.render(conversation_id, user_text, limit=5) if user_text else "暂无相关记忆。"
+        memory = f"{memory}\n\n相关历史检索：\n{rag_memory}"
         mode_rule = (
             "当前是实时语音通话：回复要更短、更像口语，优先 1 到 3 句。允许自然的短反馈。"
             if mode == "realtime"
@@ -424,4 +441,5 @@ class CompanionOrchestrator:
     ) -> TurnAnalysis:
         analysis = self.analyze(user_text)
         self.memory.update_from_turn(conversation_id, user_text, assistant_text, analysis)
+        self.rag.add_turn(conversation_id, user_text, assistant_text, analysis.emotion)
         return analysis

@@ -62,6 +62,11 @@ struct RealtimeCallView: View {
                         .font(.footnote.weight(.medium))
                         .foregroundStyle(.green.opacity(0.85))
                 }
+                if let audioEmotion = service.audioEmotionText {
+                    Text(audioEmotion)
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.48))
+                }
             }
 
             if let error = service.errorMessage {

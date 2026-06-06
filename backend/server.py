@@ -28,6 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
+from metrics_store import MetricsStore
 from orchestrator import CompanionOrchestrator
 
 load_dotenv()
@@ -47,6 +48,7 @@ PUBLIC_HOST = os.environ.get("VOICEMATE_PUBLIC_HOST", "192.168.10.233")
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+CHAT_MAX_TOKENS = int(os.environ.get("VOICEMATE_CHAT_MAX_TOKENS", "220"))
 
 VOLCENGINE_TTS_DEFAULT_VOICE = "zh_female_qingxinnvsheng_mars_bigtts"
 DEFAULT_VOICE = os.environ.get("VOICEMATE_TTS_VOICE", VOLCENGINE_TTS_DEFAULT_VOICE)
@@ -72,6 +74,10 @@ LIVEKIT_URL = os.environ.get("LIVEKIT_URL", f"ws://{LIVEKIT_HOST}:{LIVEKIT_PORT}
 LIVEKIT_API_KEY = os.environ.get("LIVEKIT_API_KEY", "devkey")
 LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "secret")
 LIVEKIT_AGENT_NAME = os.environ.get("LIVEKIT_AGENT_NAME", "VoiceMate")
+VOLCENGINE_RTC_APP_ID = os.environ.get("VOLCENGINE_RTC_APP_ID", "")
+VOLCENGINE_RTC_APP_KEY = os.environ.get("VOLCENGINE_RTC_APP_KEY", "")
+VOLCENGINE_RTC_TOKEN_URL = os.environ.get("VOLCENGINE_RTC_TOKEN_URL", "")
+VOICEMATE_RTC_PROVIDER = os.environ.get("VOICEMATE_RTC_PROVIDER", "livekit").strip().lower()
 
 logging.basicConfig(
     level=os.environ.get("VOICEMATE_LOG_LEVEL", "INFO"),
@@ -86,6 +92,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def startup_prewarm() -> None:
+    if os.environ.get("VOICEMATE_STARTUP_PREWARM", "1").lower() in {"0", "false", "no"}:
+        return
+    try:
+        result = await prewarm()
+        logger.info("Startup prewarm complete: %s", result)
+    except Exception as exc:
+        logger.warning("Startup prewarm failed: %s", exc)
 
 PERSONAS: dict[str, str] = {
     "love": "你是亲密、温柔、有边界感的个人陪伴型 AI。回复自然、简短、有情绪，但不要油腻。",
@@ -224,6 +241,7 @@ class ConversationStore:
 
 history_store = ConversationStore(HISTORY_DIR)
 companion_orchestrator = CompanionOrchestrator(MEMORY_DIR)
+metrics_store = MetricsStore(MEMORY_DIR)
 
 
 def clean_text(text: str) -> str:
@@ -231,22 +249,21 @@ def clean_text(text: str) -> str:
 
 
 def detect_emotion(text: str) -> str:
-    if re.search(r"[?？]", text):
-        return "curious"
-    if any(word in text for word in ("焦虑", "慌", "担心", "紧张", "睡不着")):
+    if any(word in text for word in ("焦虑", "慌", "害怕", "担心", "心烦", "紧张", "压力", "睡不着")):
         return "anxious"
-    if any(word in text for word in ("孤独", "没人陪", "一个人", "没人懂")):
+    if any(word in text for word in ("孤独", "没人陪", "一个人", "没人懂", "空落落")):
         return "lonely"
-    if any(word in text for word in ("生气", "气死", "火大", "不爽")):
+    if any(word in text for word in ("生气", "气死", "火大", "烦死", "讨厌", "不爽")):
         return "angry"
-    if any(word in text for word in ("想你", "抱抱", "陪我", "喜欢你", "爱你")):
+    if any(word in text for word in ("想你", "抱抱", "陪我", "喜欢你", "爱你", "贴贴")):
         return "affectionate"
-    if any(word in text for word in ("开心", "高兴", "哈哈", "喜欢")):
+    if any(word in text for word in ("开心", "高兴", "哈哈", "太好了", "喜欢")):
         return "cheerful"
-    if any(word in text for word in ("难过", "烦", "累", "痛苦", "崩")):
+    if any(word in text for word in ("难受", "累", "崩溃", "委屈", "想哭", "痛苦", "失落")):
         return "comforting"
+    if "?" in text or "？" in text:
+        return "curious"
     return "gentle"
-
 
 def tts_rate(speed: Optional[float]) -> str:
     value = speed or 1.0
@@ -319,7 +336,7 @@ class LLMClient:
                 model=DEEPSEEK_MODEL,
                 messages=messages,
                 temperature=0.8,
-                max_tokens=500,
+                max_tokens=CHAT_MAX_TOKENS,
             )
             content = response.choices[0].message.content or ""
             return clean_text(content) or "我在听，你继续说。"
@@ -520,6 +537,7 @@ async def index():
 
 @app.post("/v1/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
+    total_timer = metrics_store.timer("chat_total")
     text = clean_text(request.text)
     if not text:
         raise HTTPException(status_code=400, detail="Text cannot be empty")
@@ -527,9 +545,12 @@ async def chat(request: ChatRequest):
     conversation_id = request.conversation_id or uuid.uuid4().hex
     persona = request.persona or DEFAULT_PERSONA
     analysis = companion_orchestrator.analyze(text)
+    llm_timer = metrics_store.timer("chat_llm")
     reply = await llm.reply(text, conversation_id, persona)
+    llm_timer.stop(persona=persona)
     reply_emotion = detect_emotion(reply)
     tts_emotion = analysis.tts_emotion if analysis.emotion != "neutral" else reply_emotion
+    tts_timer = metrics_store.timer("chat_tts")
     audio_path, duration_ms = await tts.synthesize(
         reply,
         request.voice,
@@ -537,12 +558,14 @@ async def chat(request: ChatRequest):
         emotion=tts_emotion,
         emotion_speed=analysis.tts_speed,
     )
+    tts_timer.stop(emotion=tts_emotion)
     history_store.append(conversation_id, text, reply)
     recorded = companion_orchestrator.record_turn(
         conversation_id=conversation_id,
         user_text=text,
         assistant_text=reply,
     )
+    total_timer.stop(persona=persona, emotion=recorded.emotion)
     return ChatResponse(
         reply_text=reply,
         audio_url=audio_url(audio_path),
@@ -691,6 +714,129 @@ async def livekit_token(request: Optional[LiveKitTokenRequest] = None):
         raise HTTPException(status_code=500, detail=f"LiveKit token failed: {exc}") from exc
 
     return {"token": token, "room": room_name, "url": LIVEKIT_URL}
+
+
+@app.get("/v1/monitor/summary")
+async def monitor_summary(window_seconds: int = 3600):
+    return {
+        "status": "ok",
+        "rtc_provider": VOICEMATE_RTC_PROVIDER,
+        "targets": {
+            "first_ack_ms": 300,
+            "full_turn_ms": 1800,
+        },
+        "metrics": metrics_store.summary(window_seconds=window_seconds),
+        "voice": VOLCENGINE_TTS_VOICE_TYPE,
+        "livekit_url": LIVEKIT_URL,
+        "volcengine_rtc_configured": bool(VOLCENGINE_RTC_APP_ID and (VOLCENGINE_RTC_APP_KEY or VOLCENGINE_RTC_TOKEN_URL)),
+    }
+
+
+@app.get("/monitor", response_class=HTMLResponse)
+async def monitor_page():
+    data = await monitor_summary()
+    rows = []
+    for name, item in data["metrics"].items():
+        rows.append(
+            "<tr>"
+            f"<td>{name}</td>"
+            f"<td>{item['count']}</td>"
+            f"<td>{item['latest_ms']}</td>"
+            f"<td>{item['p50_ms']}</td>"
+            f"<td>{item['p90_ms']}</td>"
+            f"<td>{item['avg_ms']}</td>"
+            "</tr>"
+        )
+    return HTMLResponse(
+        """
+        <!doctype html>
+        <html lang="zh-CN">
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width,initial-scale=1">
+          <meta http-equiv="refresh" content="5">
+          <title>VoiceMate Monitor</title>
+          <style>
+            body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:24px;background:#f6f7f8;color:#1f2328}}
+            h1{{font-size:22px;margin:0 0 12px}}
+            .meta{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:12px 0 18px}}
+            .box{{background:white;border:1px solid #e5e7eb;border-radius:8px;padding:12px}}
+            table{{width:100%;border-collapse:collapse;background:white;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden}}
+            th,td{{text-align:left;padding:10px;border-bottom:1px solid #edf0f2;font-size:14px}}
+            th{{background:#f0f2f4}}
+          </style>
+        </head>
+        <body>
+          <h1>VoiceMate Monitor</h1>
+          <div class="meta">
+            <div class="box">RTC: <b>{rtc}</b></div>
+            <div class="box">Voice: <b>{voice}</b></div>
+            <div class="box">LiveKit: <b>{livekit}</b></div>
+            <div class="box">Volc RTC configured: <b>{volc_rtc}</b></div>
+          </div>
+          <table>
+            <thead><tr><th>Metric</th><th>Count</th><th>Latest ms</th><th>P50 ms</th><th>P90 ms</th><th>Avg ms</th></tr></thead>
+            <tbody>{rows}</tbody>
+          </table>
+        </body>
+        </html>
+        """.format(
+            rtc=data["rtc_provider"],
+            voice=data["voice"],
+            livekit=data["livekit_url"],
+            volc_rtc=data["volcengine_rtc_configured"],
+            rows="\n".join(rows) or "<tr><td colspan='6'>暂无指标，先进行一次聊天或通话。</td></tr>",
+        )
+    )
+
+
+@app.get("/v1/rtc/capabilities")
+async def rtc_capabilities():
+    return {
+        "active_provider": VOICEMATE_RTC_PROVIDER,
+        "livekit": {
+            "configured": bool(LIVEKIT_URL and LIVEKIT_API_KEY and LIVEKIT_API_SECRET),
+            "url": LIVEKIT_URL,
+            "role": "active",
+        },
+        "volcengine_rtc": {
+            "configured": bool(VOLCENGINE_RTC_APP_ID and (VOLCENGINE_RTC_APP_KEY or VOLCENGINE_RTC_TOKEN_URL)),
+            "app_id_present": bool(VOLCENGINE_RTC_APP_ID),
+            "token_url_present": bool(VOLCENGINE_RTC_TOKEN_URL),
+            "role": "prepared",
+            "note": "iOS Volcengine RTC SDK and token service are required before replacing LiveKit media transport.",
+        },
+    }
+
+
+@app.post("/v1/prewarm")
+async def prewarm():
+    results: dict[str, Any] = {}
+    started = metrics_store.timer("prewarm_total")
+    try:
+        tts_timer = metrics_store.timer("prewarm_tts")
+        audio = await tts._volc.synthesize_bytes(
+            "嗯，我在。",
+            voice=VOLCENGINE_TTS_VOICE_TYPE,
+            speed=1.0,
+            emotion="gentle",
+            audio_format="pcm",
+        )
+        results["tts_pcm_bytes"] = len(audio)
+        results["tts_ms"] = tts_timer.stop()
+    except Exception as exc:
+        results["tts_error"] = str(exc)
+
+    if DEEPSEEK_API_KEY:
+        try:
+            llm_timer = metrics_store.timer("prewarm_llm")
+            _ = await llm.reply("只回复一个字：在", "prewarm", DEFAULT_PERSONA)
+            results["llm_ms"] = llm_timer.stop()
+        except Exception as exc:
+            results["llm_error"] = str(exc)
+
+    results["total_ms"] = started.stop()
+    return {"status": "ok", **results}
 
 
 @app.get("/v1/proactive")

@@ -63,6 +63,8 @@ from livekit.agents import (
 from livekit.agents.voice import Agent, RunContext
 from livekit.plugins import silero
 
+from emotion_audio import AudioEmotion, analyze_pcm_emotion
+
 # ── Add project root for imports ─────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent))
 from server import (
@@ -83,6 +85,7 @@ from server import (
     VolcengineTTSClient,
     companion_orchestrator,
     history_store,
+    metrics_store,
     logger as voicemate_logger,
 )
 
@@ -320,6 +323,7 @@ class VolcengineSTT(stt.STT):
         self._speaker_profile: Optional[tuple[float, ...]] = None
         self._volc_asr = VolcengineStreamingASRClient()
         self.last_asr_latency_ms: Optional[float] = None
+        self.last_audio_emotion: Optional[AudioEmotion] = None
 
     def stream(self, *, language=None, conn_options=None) -> stt.RecognizeStream:
         from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS
@@ -566,6 +570,8 @@ class VolcengineRecognizeStream(stt.RecognizeStream):
         start_sent = False
         flushed = False
         latest_text_at = 0.0
+        audio_buffer = bytearray()
+        audio_emotion_recorded = False
         flush_grace_ms = int(os.environ.get("VOLCENGINE_ASR_FLUSH_GRACE_MS", "420"))
         auto_final_ms = int(os.environ.get("VOLCENGINE_ASR_AUTO_FINAL_MS", "900"))
         ws = await client._connect(websockets, client.ws_url, client._headers())
@@ -581,7 +587,7 @@ class VolcengineRecognizeStream(stt.RecognizeStream):
                 self._event_ch.send_nowait(stt.SpeechEvent(type=stt.SpeechEventType.START_OF_SPEECH))
 
             def emit_final_from_latest() -> None:
-                nonlocal final_sent
+                nonlocal final_sent, audio_emotion_recorded
                 if final_sent:
                     return
                 if latest_text:
@@ -599,6 +605,10 @@ class VolcengineRecognizeStream(stt.RecognizeStream):
                     )
                 final_sent = True
                 self._owner.last_asr_latency_ms = (time.perf_counter() - started) * 1000
+                metrics_store.record("realtime_asr", self._owner.last_asr_latency_ms)
+                if not audio_emotion_recorded and audio_buffer:
+                    audio_emotion_recorded = True
+                    self._owner.last_audio_emotion = analyze_pcm_emotion(bytes(audio_buffer), sample_rate=16000)
                 self._event_ch.send_nowait(stt.SpeechEvent(type=stt.SpeechEventType.END_OF_SPEECH))
 
             async def recv_loop():
@@ -669,6 +679,7 @@ class VolcengineRecognizeStream(stt.RecognizeStream):
                 if sample_rate != 16000:
                     import audioop
                     mono_pcm, _ = audioop.ratecv(mono_pcm, 2, 1, sample_rate, 16000, None)
+                audio_buffer.extend(mono_pcm)
                 await ws.send(VolcengineAsrFunctionsV3.generate_asr_audio_only_request(sequence, mono_pcm, compress=True))
                 sequence += 1
 
@@ -991,6 +1002,7 @@ class VolcengineLiveTTSStream(tts.SynthesizeStream):
                     if first_audio_ms is None:
                         first_audio_ms = (time.perf_counter() - started) * 1000
                         logger.info("TTS cached ack latency=%.0fms emotion=%s", first_audio_ms, segment_emotion)
+                        metrics_store.record("realtime_tts_ack", first_audio_ms, {"emotion": segment_emotion})
                     output_emitter.start_segment(segment_id=str(uuid.uuid4()))
                     self._push_pcm(output_emitter, ack_pcm)
                     output_emitter.end_segment()
@@ -1006,6 +1018,7 @@ class VolcengineLiveTTSStream(tts.SynthesizeStream):
             if first_audio_ms is None:
                 first_audio_ms = (time.perf_counter() - started) * 1000
                 logger.info("TTS first audio latency=%.0fms chars=%d", first_audio_ms, len(text))
+                metrics_store.record("realtime_tts_first_audio", first_audio_ms, {"emotion": segment_emotion})
             output_emitter.start_segment(segment_id=segment_id)
             self._push_pcm(output_emitter, pcm_data)
             output_emitter.end_segment()
@@ -1172,6 +1185,12 @@ class VoiceMateAgent(Agent):
         if user_text:
             self._last_user_text = user_text
             self._last_analysis = companion_orchestrator.analyze(user_text)
+            audio_emotion = self._volcengine_stt.last_audio_emotion
+            if audio_emotion and audio_emotion.confidence >= 0.60 and self._last_analysis.emotion in {"neutral", "curious"}:
+                self._last_analysis.emotion = audio_emotion.emotion
+                if audio_emotion.emotion in {"angry", "anxious", "comforting", "lonely"}:
+                    self._last_analysis.tts_emotion = "sad" if audio_emotion.emotion != "angry" else "angry"
+                    self._last_analysis.tts_speed = 0.92
             self._volc_tts.emotion_hint = self._last_analysis.tts_emotion
             self._volc_tts.speed_hint = self._last_analysis.tts_speed
             await self._publish_call_event("user_transcript", text=user_text, is_final=True)
@@ -1182,6 +1201,17 @@ class VoiceMateAgent(Agent):
                 intensity=self._last_analysis.intensity,
                 need=self._last_analysis.need,
             )
+            if audio_emotion:
+                await self._publish_call_event(
+                    "audio_emotion",
+                    emotion=audio_emotion.emotion,
+                    confidence=audio_emotion.confidence,
+                    arousal=audio_emotion.arousal,
+                    valence=audio_emotion.valence,
+                    rms=audio_emotion.rms,
+                    zcr=audio_emotion.zcr,
+                    tempo=audio_emotion.tempo,
+                )
             if self._volcengine_stt.last_asr_latency_ms is not None:
                 await self._publish_call_event("metrics", label="ASR", value_ms=self._volcengine_stt.last_asr_latency_ms)
             await self._publish_call_event("call_state", state="thinking")
@@ -1219,13 +1249,16 @@ class VoiceMateAgent(Agent):
                     if first_token_ms is None:
                         first_token_ms = (time.perf_counter() - llm_started) * 1000
                         logger.info("LLM first token latency=%.0fms [%s]", first_token_ms, self._conv_id)
+                        metrics_store.record("realtime_llm_first_token", first_token_ms)
                         await self._publish_call_event("metrics", label="LLM", value_ms=first_token_ms)
                         await self._publish_call_event("call_state", state="speaking")
                     full_text.append(chunk.delta.content)
                 yield chunk
         reply = "".join(full_text).strip()
         if reply:
-            logger.info("LLM full response latency=%.0fms chars=%d [%s]", (time.perf_counter() - llm_started) * 1000, len(reply), self._conv_id)
+            full_response_ms = (time.perf_counter() - llm_started) * 1000
+            logger.info("LLM full response latency=%.0fms chars=%d [%s]", full_response_ms, len(reply), self._conv_id)
+            metrics_store.record("realtime_llm_full", full_response_ms)
             await self._publish_call_event("call_state", state="listening")
             if self._last_user_text:
                 history_store.append(self._conv_id, self._last_user_text, reply)
