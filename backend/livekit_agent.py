@@ -122,6 +122,14 @@ ASR_API_BASE_URL = (
     or os.environ.get("OPENAI_BASE_URL")
     or "https://api.openai.com/v1"
 )
+ASR_PROVIDER = os.environ.get("VOICEMATE_ASR_PROVIDER", "volcengine").strip().lower()
+VOLCENGINE_ASR_WS_URL = os.environ.get(
+    "VOLCENGINE_ASR_WS_URL",
+    "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async",
+)
+VOLCENGINE_ASR_APP_KEY = os.environ.get("VOLCENGINE_ASR_APP_KEY", os.environ.get("VOLC_APPID", ""))
+VOLCENGINE_ASR_ACCESS_KEY = os.environ.get("VOLCENGINE_ASR_ACCESS_KEY", os.environ.get("VOLC_TOKEN", ""))
+VOLCENGINE_ASR_RESOURCE_ID = os.environ.get("VOLCENGINE_ASR_RESOURCE_ID", "volc.bigasr.sauc.duration")
 
 # Noise/side-speech rejection. Tune these from .env if the room is very quiet/loud.
 ASR_MIN_AUDIO_SECONDS = float(os.environ.get("VOICEMATE_ASR_MIN_AUDIO_SECONDS", "0.75"))
@@ -201,6 +209,114 @@ def _speaker_similarity(profile: tuple[float, ...], features: tuple[float, ...])
     )
 
 
+class VolcengineStreamingASRClient:
+    def __init__(self):
+        self.ws_url = VOLCENGINE_ASR_WS_URL
+        self.app_key = VOLCENGINE_ASR_APP_KEY
+        self.access_key = VOLCENGINE_ASR_ACCESS_KEY
+        self.resource_id = VOLCENGINE_ASR_RESOURCE_ID
+
+    @property
+    def is_available(self) -> bool:
+        return bool(self.app_key and self.access_key and self.resource_id)
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "X-Api-App-Key": self.app_key,
+            "X-Api-Access-Key": self.access_key,
+            "X-Api-Resource-Id": self.resource_id,
+            "X-Api-Connect-Id": str(uuid.uuid4()),
+        }
+
+    @staticmethod
+    async def _connect(websockets, url: str, headers: dict[str, str]):
+        try:
+            return await websockets.connect(url, additional_headers=headers, max_size=1000000000)
+        except TypeError:
+            return await websockets.connect(url, extra_headers=headers, max_size=1000000000)
+
+    async def transcribe_pcm(self, pcm_data: bytes, sample_rate: int = 16000) -> tuple[str, float]:
+        if not self.is_available:
+            raise RuntimeError("Volcengine ASR credentials are not configured")
+
+        import websockets
+        from volcengine_audio import VolcengineAsrFunctionsV3, VolcengineAsrRequestV3
+
+        started = time.perf_counter()
+        request = VolcengineAsrRequestV3(
+            user=VolcengineAsrRequestV3.User(uid="voicemate"),
+            audio=VolcengineAsrRequestV3.Audio(format="pcm", codec="raw", rate=16000, bits=16, channel=1),
+            request=VolcengineAsrRequestV3.Request(
+                model_name="bigmodel",
+                enable_punc=True,
+                enable_itn=True,
+                enable_ddc=True,
+                enable_accelerate_text=True,
+                accelerate_score=8,
+                vad_segment_duration=int(os.environ.get("VOLCENGINE_ASR_VAD_SEGMENT_MS", "1200")),
+                end_window_size=int(os.environ.get("VOLCENGINE_ASR_END_WINDOW_MS", "420")),
+                force_to_speech_time=int(os.environ.get("VOLCENGINE_ASR_FORCE_SPEECH_MS", "6000")),
+            ),
+        ).model_dump(exclude_none=True)
+
+        final_text = ""
+        latest_text = ""
+        sequence = 1
+        frame_bytes = int(sample_rate * 0.10) * 2
+        timeout = float(os.environ.get("VOLCENGINE_ASR_TIMEOUT_SECONDS", "18"))
+
+        async with await self._connect(websockets, self.ws_url, self._headers()) as ws:
+            await ws.send(VolcengineAsrFunctionsV3.generate_asr_full_client_request(sequence, request, compression=True))
+            await asyncio.wait_for(ws.recv(), timeout=timeout)
+            sequence += 1
+
+            for offset in range(0, len(pcm_data), frame_bytes):
+                chunk = pcm_data[offset: offset + frame_bytes]
+                await ws.send(VolcengineAsrFunctionsV3.generate_asr_audio_only_request(sequence, chunk, compress=True))
+                sequence += 1
+                while True:
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=0.02)
+                    except asyncio.TimeoutError:
+                        break
+                    parsed = VolcengineAsrFunctionsV3.parse_response(raw)
+                    latest_text = self._extract_text(parsed) or latest_text
+                    if parsed.get("is_last_package"):
+                        final_text = latest_text
+                        break
+                if final_text:
+                    break
+
+            if not final_text:
+                await ws.send(VolcengineAsrFunctionsV3.generate_asr_audio_only_request(sequence, b"", compress=False))
+                while True:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+                    parsed = VolcengineAsrFunctionsV3.parse_response(raw)
+                    latest_text = self._extract_text(parsed) or latest_text
+                    if parsed.get("is_last_package"):
+                        final_text = latest_text
+                        break
+
+        return (final_text or latest_text).strip(), (time.perf_counter() - started) * 1000
+
+    @staticmethod
+    def _extract_text(payload: dict) -> str:
+        result = payload.get("payload_msg") or payload.get("payload") or payload
+        if not isinstance(result, dict):
+            return ""
+        result_obj = result.get("result") or result.get("message", {}).get("result")
+        if isinstance(result_obj, dict):
+            text = result_obj.get("text")
+            if isinstance(text, str):
+                return text
+            utterances = result_obj.get("utterances")
+            if isinstance(utterances, list) and utterances:
+                return "".join(u.get("text", "") for u in utterances if isinstance(u, dict))
+        if isinstance(result_obj, list) and result_obj:
+            return "".join(item.get("text", "") for item in result_obj if isinstance(item, dict))
+        return ""
+
+
 # ── Custom STT: Whisper ──────────────────────────────────────────────────────
 
 class WhisperSTT(stt.STT):
@@ -230,6 +346,7 @@ class WhisperSTT(stt.STT):
                 base_url=ASR_API_BASE_URL,
             )
         self._speaker_profile: Optional[tuple[float, ...]] = None
+        self._volc_asr = VolcengineStreamingASRClient()
 
     def _model_ref(self) -> str:
         if Path(self._local_model_size).exists():
@@ -393,6 +510,17 @@ class WhisperSTT(stt.STT):
             len(frames),
         )
 
+    def _update_speaker_profile(self, voice_features: tuple[float, ...]) -> None:
+        if self._speaker_profile is None:
+            self._speaker_profile = voice_features
+            logger.info("Speaker lock enrolled from first clear utterance")
+            return
+        alpha = max(0.0, min(SPEAKER_LOCK_LEARN_RATE, 1.0))
+        self._speaker_profile = tuple(
+            old * (1.0 - alpha) + new * alpha
+            for old, new in zip(self._speaker_profile, voice_features)
+        )
+
     async def _recognize_impl(
         self,
         buffer: AudioBuffer,
@@ -437,6 +565,40 @@ class WhisperSTT(stt.STT):
                         type=stt.SpeechEventType.END_OF_SPEECH,
                         alternatives=[],
                     )
+
+            text = ""
+            if ASR_PROVIDER == "volcengine" and self._volc_asr.is_available:
+                try:
+                    pcm_data = wav_bytes[44:] if wav_bytes.startswith(b"RIFF") else wav_bytes
+                    if sample_rate != 16000:
+                        import audioop
+                        pcm_data, _ = audioop.ratecv(pcm_data, 2, 1, sample_rate, 16000, None)
+                    text, latency_ms = await self._volc_asr.transcribe_pcm(pcm_data, sample_rate=16000)
+                    logger.info("Volcengine ASR: latency=%.0fms text=%s", latency_ms, text[:80])
+                except Exception as e:
+                    logger.warning("Volcengine ASR failed; falling back to local Whisper: %s", e)
+
+            if text:
+                if _is_noise_text(text):
+                    logger.info("STT: empty transcription")
+                    return stt.SpeechEvent(
+                        type=stt.SpeechEventType.END_OF_SPEECH,
+                        alternatives=[],
+                    )
+                if SPEAKER_LOCK_ENABLED and duration_seconds >= SPEAKER_LOCK_MIN_SECONDS and rms >= SPEAKER_LOCK_MIN_RMS:
+                    self._update_speaker_profile(voice_features)
+                return stt.SpeechEvent(
+                    type=stt.SpeechEventType.FINAL_TRANSCRIPT,
+                    alternatives=[
+                        stt.SpeechData(
+                            language=lang,
+                            text=text,
+                            start_time=0.0,
+                            end_time=0.0,
+                            confidence=0.95,
+                        )
+                    ],
+                )
 
             if self._use_local_model and self._local_model is None:
                 await self._load_local_model()
@@ -504,15 +666,7 @@ class WhisperSTT(stt.STT):
                 )
 
             if SPEAKER_LOCK_ENABLED and duration_seconds >= SPEAKER_LOCK_MIN_SECONDS and rms >= SPEAKER_LOCK_MIN_RMS:
-                if self._speaker_profile is None:
-                    self._speaker_profile = voice_features
-                    logger.info("Speaker lock enrolled from first clear utterance")
-                else:
-                    alpha = max(0.0, min(SPEAKER_LOCK_LEARN_RATE, 1.0))
-                    self._speaker_profile = tuple(
-                        old * (1.0 - alpha) + new * alpha
-                        for old, new in zip(self._speaker_profile, voice_features)
-                    )
+                self._update_speaker_profile(voice_features)
 
             logger.info(f"STT: {text[:80]}")
             return stt.SpeechEvent(
@@ -1097,13 +1251,19 @@ class VoiceMateAgent(Agent):
             tool_choice=tool_choice,
         )
         full_text: list[str] = []
+        llm_started = time.perf_counter()
+        first_token_ms: Optional[float] = None
         async with stream:
             async for chunk in stream:
                 if chunk.delta and chunk.delta.content:
+                    if first_token_ms is None:
+                        first_token_ms = (time.perf_counter() - llm_started) * 1000
+                        logger.info("LLM first token latency=%.0fms [%s]", first_token_ms, self._conv_id)
                     full_text.append(chunk.delta.content)
                 yield chunk
         reply = "".join(full_text).strip()
         if reply:
+            logger.info("LLM full response latency=%.0fms chars=%d [%s]", (time.perf_counter() - llm_started) * 1000, len(reply), self._conv_id)
             if self._last_user_text:
                 history_store.append(self._conv_id, self._last_user_text, reply)
                 companion_orchestrator.record_turn(

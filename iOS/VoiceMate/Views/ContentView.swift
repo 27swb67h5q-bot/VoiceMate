@@ -304,9 +304,9 @@ struct SettingsView: View {
 
     private let voices = [
         "zh_female_wanqudashu_moon_bigtts": "火山女声",
-        "zh_male_wennuanahu_moon_bigtts": "火山男声",
         "zh_female_qingxinnvsheng_mars_bigtts": "清新女声",
-        "zh_male_shaonianzixin_moon_bigtts": "少年男声",
+        "zh_female_tianmeixiaoyuan_moon_bigtts": "甜美女声",
+        "zh_female_gaolengyujie_moon_bigtts": "冷静女声",
     ]
 
     private let personas = [

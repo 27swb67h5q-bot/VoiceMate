@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -49,39 +50,79 @@ class CompanionMemoryStore:
     def __init__(self, root: Path):
         self.root = root
         self.root.mkdir(parents=True, exist_ok=True)
+        self.db_path = self.root / "companion.sqlite3"
+        self._init_db()
 
-    def _path(self, conversation_id: str) -> Path:
-        safe = re.sub(r"[^a-zA-Z0-9_-]", "", conversation_id) or "default"
-        return self.root / f"{safe}.json"
+    def _connect(self):
+        return sqlite3.connect(self.db_path)
+
+    def _init_db(self) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS companion_memory (
+                    conversation_id TEXT PRIMARY KEY,
+                    facts TEXT NOT NULL DEFAULT '[]',
+                    preferences TEXT NOT NULL DEFAULT '{}',
+                    mood TEXT NOT NULL DEFAULT 'neutral',
+                    last_user_emotion TEXT NOT NULL DEFAULT 'neutral',
+                    updated_at TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS conversation_turns (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    conversation_id TEXT NOT NULL,
+                    user_text TEXT NOT NULL,
+                    assistant_text TEXT NOT NULL,
+                    emotion TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
 
     def load(self, conversation_id: str) -> dict[str, Any]:
-        path = self._path(conversation_id)
-        if not path.exists():
-            return {
-                "facts": [],
-                "preferences": {},
-                "mood": "neutral",
-                "last_user_emotion": "neutral",
-                "updated_at": None,
-            }
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                data.setdefault("facts", [])
-                data.setdefault("preferences", {})
-                data.setdefault("mood", "neutral")
-                data.setdefault("last_user_emotion", "neutral")
-                return data
-        except Exception:
-            pass
-        return {"facts": [], "preferences": {}, "mood": "neutral", "last_user_emotion": "neutral"}
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT facts, preferences, mood, last_user_emotion, updated_at FROM companion_memory WHERE conversation_id = ?",
+                (conversation_id,),
+            ).fetchone()
+        if not row:
+            return {"facts": [], "preferences": {}, "mood": "neutral", "last_user_emotion": "neutral", "updated_at": None}
+        facts, preferences, mood, last_user_emotion, updated_at = row
+        return {
+            "facts": json.loads(facts or "[]"),
+            "preferences": json.loads(preferences or "{}"),
+            "mood": mood or "neutral",
+            "last_user_emotion": last_user_emotion or "neutral",
+            "updated_at": updated_at,
+        }
 
     def save(self, conversation_id: str, data: dict[str, Any]) -> None:
         data["updated_at"] = datetime.now().isoformat(timespec="seconds")
-        self._path(conversation_id).write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO companion_memory(conversation_id, facts, preferences, mood, last_user_emotion, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(conversation_id) DO UPDATE SET
+                    facts=excluded.facts,
+                    preferences=excluded.preferences,
+                    mood=excluded.mood,
+                    last_user_emotion=excluded.last_user_emotion,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    conversation_id,
+                    json.dumps(data.get("facts", []), ensure_ascii=False),
+                    json.dumps(data.get("preferences", {}), ensure_ascii=False),
+                    data.get("mood", "neutral"),
+                    data.get("last_user_emotion", "neutral"),
+                    data.get("updated_at"),
+                ),
+            )
 
     def update_from_turn(
         self,
@@ -112,6 +153,20 @@ class CompanionMemoryStore:
         memory["preferences"] = preferences
 
         self.save(conversation_id, memory)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO conversation_turns(conversation_id, user_text, assistant_text, emotion, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    conversation_id,
+                    user_text,
+                    assistant_text,
+                    analysis.emotion,
+                    datetime.now().isoformat(timespec="seconds"),
+                ),
+            )
 
     def render(self, conversation_id: str) -> str:
         memory = self.load(conversation_id)

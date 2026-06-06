@@ -60,6 +60,12 @@ VOLCENGINE_TTS_RESOURCE_ID = os.environ.get("VOLCENGINE_TTS_RESOURCE_ID", "volc.
 VOLCENGINE_TTS_WS_URL = os.environ.get("VOLCENGINE_TTS_WS_URL", "wss://openspeech.bytedance.com/api/v3/tts/bidirection")
 VOLCENGINE_TTS_VOICE_TYPE = os.environ.get("VOLCENGINE_TTS_VOICE_TYPE", "zh_female_wanqudashu_moon_bigtts")
 VOLCENGINE_TTS_MODEL = os.environ.get("VOLCENGINE_TTS_MODEL", "seed-tts-2.0-expressive")
+VOLCENGINE_TTS_FEMALE_VOICES = {
+    "zh_female_wanqudashu_moon_bigtts",
+    "zh_female_qingxinnvsheng_mars_bigtts",
+    "zh_female_tianmeixiaoyuan_moon_bigtts",
+    "zh_female_gaolengyujie_moon_bigtts",
+}
 
 LIVEKIT_HOST = os.environ.get("LIVEKIT_HOST", PUBLIC_HOST)
 LIVEKIT_PORT = int(os.environ.get("LIVEKIT_PORT", "7880"))
@@ -284,6 +290,10 @@ def normalize_volcengine_voice(voice: Optional[str]) -> str:
     if voice.endswith("Neural") or voice.startswith(("clone_", "fish_", "mimo_")):
         return VOLCENGINE_TTS_VOICE_TYPE
     if "_" not in voice:
+        return VOLCENGINE_TTS_VOICE_TYPE
+    if voice.startswith("zh_female_") and voice in VOLCENGINE_TTS_FEMALE_VOICES:
+        return voice
+    if voice.startswith("zh_female_"):
         return VOLCENGINE_TTS_VOICE_TYPE
     return voice
 

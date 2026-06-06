@@ -5,3 +5,4 @@ __pycache__/
 .env
 audio_cache/
 history/
+memory/
