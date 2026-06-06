@@ -207,7 +207,7 @@ struct ContentView: View {
             do {
                 let response = try await service.sendMessage(text, conversationId: conversationId)
                 conversationId = response.conversationId
-                companionState = companionLabel(response.emotion)
+                companionState = response.emotionLabel ?? companionLabel(response.emotion)
                 let assistant = ChatMessage(role: .assistant, text: response.replyText, audioURL: response.audioUrl)
                 messages.append(assistant)
                 try? await service.playAudio(path: response.audioUrl)
@@ -238,6 +238,14 @@ struct ContentView: View {
 
     private func companionLabel(_ emotion: String?) -> String {
         switch emotion {
+        case "anxious":
+            return "先陪你稳一下"
+        case "lonely":
+            return "我在这儿陪你"
+        case "angry":
+            return "先接住你的火气"
+        case "affectionate":
+            return "轻轻靠近你一点"
         case "comforting":
             return "听起来你有点累，我会放轻一点"
         case "cheerful":

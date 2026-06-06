@@ -15,6 +15,110 @@ class TurnAnalysis:
     need: str
     intensity: int
     reply_style: str
+    valence: int = 0
+    arousal: int = 1
+    tts_emotion: str = "gentle"
+    tts_speed: float = 1.0
+    status_label: str = "在听你说"
+
+
+EMOTION_PROFILES: dict[str, dict[str, Any]] = {
+    "comforting": {
+        "need": "emotional_support",
+        "reply_style": "soft_presence",
+        "tts_emotion": "sad",
+        "tts_speed": 0.92,
+        "status_label": "听见你的难受了",
+        "valence": -2,
+        "arousal": 2,
+    },
+    "anxious": {
+        "need": "grounding",
+        "reply_style": "slow_reassurance",
+        "tts_emotion": "sad",
+        "tts_speed": 0.90,
+        "status_label": "先陪你稳一下",
+        "valence": -2,
+        "arousal": 3,
+    },
+    "lonely": {
+        "need": "companionship",
+        "reply_style": "warm_presence",
+        "tts_emotion": "sad",
+        "tts_speed": 0.93,
+        "status_label": "我在这儿陪你",
+        "valence": -2,
+        "arousal": 1,
+    },
+    "angry": {
+        "need": "validation",
+        "reply_style": "validate_then_deescalate",
+        "tts_emotion": "angry",
+        "tts_speed": 0.96,
+        "status_label": "先接住你的火气",
+        "valence": -2,
+        "arousal": 3,
+    },
+    "cheerful": {
+        "need": "share_joy",
+        "reply_style": "bright_mirroring",
+        "tts_emotion": "happy",
+        "tts_speed": 1.06,
+        "status_label": "被你的开心带起来了",
+        "valence": 2,
+        "arousal": 2,
+    },
+    "affectionate": {
+        "need": "intimacy",
+        "reply_style": "gentle_affection",
+        "tts_emotion": "happy",
+        "tts_speed": 0.98,
+        "status_label": "轻轻靠近你一点",
+        "valence": 2,
+        "arousal": 1,
+    },
+    "focused": {
+        "need": "solve_problem",
+        "reply_style": "clear_steps",
+        "tts_emotion": "gentle",
+        "tts_speed": 1.0,
+        "status_label": "陪你把问题拆开",
+        "valence": 0,
+        "arousal": 2,
+    },
+    "curious": {
+        "need": "answer_question",
+        "reply_style": "curious_answer",
+        "tts_emotion": "happy",
+        "tts_speed": 1.02,
+        "status_label": "认真接你的问题",
+        "valence": 0,
+        "arousal": 1,
+    },
+    "neutral": {
+        "need": "conversation",
+        "reply_style": "natural_chat",
+        "tts_emotion": "gentle",
+        "tts_speed": 1.0,
+        "status_label": "在听你说",
+        "valence": 0,
+        "arousal": 1,
+    },
+}
+
+
+EMOTION_LEXICON: dict[str, tuple[str, ...]] = {
+    "anxious": ("焦虑", "慌", "害怕", "担心", "心烦", "睡不着", "压力", "紧张", "喘不过气"),
+    "comforting": ("烦", "累", "崩", "难受", "不开心", "委屈", "想哭", "撑不住", "痛苦", "失落"),
+    "lonely": ("孤独", "没人陪", "一个人", "空落落", "没人懂", "好冷清"),
+    "angry": ("生气", "气死", "火大", "烦死", "讨厌", "不爽", "凭什么"),
+    "cheerful": ("开心", "哈哈", "好玩", "舒服", "喜欢", "太好了", "开心死", "爽"),
+    "affectionate": ("想你", "抱抱", "陪我", "喜欢你", "爱你", "贴贴", "亲亲"),
+    "focused": ("怎么办", "怎么做", "帮我", "修复", "方案", "检查", "优化", "构建", "报错"),
+}
+
+
+INTENSIFIERS = ("特别", "非常", "真的", "太", "快", "一直", "完全", "超级", "有点", "好")
 
 
 PERSONA_POLICIES: dict[str, dict[str, str]] = {
@@ -204,36 +308,48 @@ class CompanionOrchestrator:
 
     def analyze(self, text: str) -> TurnAnalysis:
         compact = text.strip()
-        emotion = "neutral"
-        need = "conversation"
-        intensity = 1
-
-        if any(w in compact for w in ("烦", "累", "崩", "难受", "焦虑", "不开心", "委屈", "孤独")):
-            emotion = "comforting"
-            need = "emotional_support"
-            intensity = 3
-        elif any(w in compact for w in ("开心", "哈哈", "好玩", "舒服", "喜欢")):
-            emotion = "cheerful"
-            need = "share_joy"
-            intensity = 2
-        elif any(w in compact for w in ("怎么办", "怎么做", "帮我", "修复", "方案")):
-            emotion = "focused"
-            need = "solve_problem"
-            intensity = 2
-        elif compact.endswith(("?", "？")):
-            emotion = "curious"
-            need = "answer_question"
-            intensity = 1
-
-        if len(compact) <= 8:
+        emotion = self._detect_emotion(compact)
+        profile = EMOTION_PROFILES[emotion]
+        intensity = self._intensity(compact, emotion)
+        reply_style = profile["reply_style"]
+        if len(compact) <= 8 and emotion not in {"anxious", "comforting", "angry", "lonely"}:
             reply_style = "brief_backchannel"
-        elif need == "solve_problem":
-            reply_style = "clear_steps"
-        elif need == "emotional_support":
-            reply_style = "soft_presence"
-        else:
-            reply_style = "natural_chat"
-        return TurnAnalysis(emotion=emotion, need=need, intensity=intensity, reply_style=reply_style)
+        return TurnAnalysis(
+            emotion=emotion,
+            need=profile["need"],
+            intensity=intensity,
+            reply_style=reply_style,
+            valence=profile["valence"],
+            arousal=profile["arousal"],
+            tts_emotion=profile["tts_emotion"],
+            tts_speed=profile["tts_speed"],
+            status_label=profile["status_label"],
+        )
+
+    def _detect_emotion(self, text: str) -> str:
+        if not text:
+            return "neutral"
+        scores: dict[str, int] = {}
+        for emotion, words in EMOTION_LEXICON.items():
+            score = sum(2 if len(word) >= 2 else 1 for word in words if word in text)
+            if score:
+                scores[emotion] = score
+        if text.endswith(("?", "？")):
+            scores["curious"] = scores.get("curious", 0) + 2
+        if not scores:
+            return "neutral"
+        priority = ["anxious", "comforting", "lonely", "angry", "affectionate", "cheerful", "focused", "curious"]
+        return max(priority, key=lambda item: (scores.get(item, 0), -priority.index(item)))
+
+    def _intensity(self, text: str, emotion: str) -> int:
+        if emotion == "neutral":
+            return 1
+        score = 2
+        if any(word in text for word in INTENSIFIERS):
+            score += 1
+        if re.search(r"[!！]{1,}|[?？]{2,}|哈{2,}|呜{2,}|哭|崩|死", text):
+            score += 1
+        return max(1, min(score, 4))
 
     def system_prompt(
         self,
@@ -244,7 +360,7 @@ class CompanionOrchestrator:
         user_text: str = "",
     ) -> str:
         policy = PERSONA_POLICIES.get(persona, PERSONA_POLICIES["love"])
-        analysis = self.analyze(user_text) if user_text else TurnAnalysis("neutral", "conversation", 1, "natural_chat")
+        analysis = self.analyze(user_text) if user_text else self.analyze("")
         memory = self.memory.render(conversation_id)
         mode_rule = (
             "当前是实时语音通话：回复要更短、更像口语，优先 1 到 3 句。允许自然的短反馈。"
@@ -263,6 +379,8 @@ class CompanionOrchestrator:
 - 情绪：{analysis.emotion}
 - 需求：{analysis.need}
 - 回复风格：{analysis.reply_style}
+- 情绪强度：{analysis.intensity}/4
+- 语音倾向：{analysis.tts_emotion}，语速系数 {analysis.tts_speed}
 
 长期记忆：
 {memory}
@@ -274,6 +392,8 @@ class CompanionOrchestrator:
 4. 语气要像正在陪他说话的人，有停顿感、接话感、记得前文。
 5. 遇到用户低落时，先接住情绪，再给很小的一步。
 6. 遇到实时通话时，不要像文章，尽量短、自然、可打断。
+7. 情绪强度高时，不要急着讲道理；先给一句具体的共情，再给一个很小的动作。
+8. 用户开心或亲近时，可以轻快一点回应，但不要读出表情、括号动作或舞台提示。
 """
 
     def build_messages(

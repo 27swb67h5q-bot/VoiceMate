@@ -738,6 +738,8 @@ class VolcengineRecognizeStream(stt.RecognizeStream):
         sequence = 1
         latest_text = ""
         final_sent = False
+        flushed = False
+        flush_grace_ms = int(os.environ.get("VOLCENGINE_ASR_FLUSH_GRACE_MS", "420"))
         ws = await client._connect(websockets, client.ws_url, client._headers())
         try:
             await ws.send(VolcengineAsrFunctionsV3.generate_asr_full_client_request(sequence, request, compression=True))
@@ -789,6 +791,9 @@ class VolcengineRecognizeStream(stt.RecognizeStream):
                                     ],
                                 )
                             )
+                            if flushed and not final_sent:
+                                emit_final_from_latest()
+                                break
                         if parsed.get("is_last_package"):
                             emit_final_from_latest()
                             break
@@ -798,8 +803,13 @@ class VolcengineRecognizeStream(stt.RecognizeStream):
             recv_task = asyncio.create_task(recv_loop())
             async for item in self._input_ch:
                 if isinstance(item, stt.RecognizeStream._FlushSentinel):
+                    flushed = True
                     await ws.send(VolcengineAsrFunctionsV3.generate_asr_audio_only_request(sequence, b"", compress=False))
                     sequence += 1
+                    if latest_text:
+                        await asyncio.sleep(max(0, flush_grace_ms) / 1000)
+                        emit_final_from_latest()
+                        break
                     continue
 
                 mono_pcm, sample_rate, _channels = WhisperSTT._frame_to_mono_pcm(item)
@@ -813,7 +823,14 @@ class VolcengineRecognizeStream(stt.RecognizeStream):
 
             if not final_sent:
                 await ws.send(VolcengineAsrFunctionsV3.generate_asr_audio_only_request(sequence, b"", compress=False))
-            await recv_task
+            if final_sent:
+                recv_task.cancel()
+                try:
+                    await recv_task
+                except asyncio.CancelledError:
+                    pass
+            else:
+                await recv_task
             emit_final_from_latest()
         finally:
             await ws.close()
@@ -1070,6 +1087,13 @@ class EdgeTTSChunkedStream(tts.ChunkedStream):
 class VolcengineLiveTTS(tts.TTS):
     """LiveKit TTS adapter for Volcengine V3 bidirectional TTS."""
 
+    ACK_TEXTS = {
+        "gentle": "嗯，我在。",
+        "happy": "嘿，我听着。",
+        "sad": "我在，慢慢说。",
+        "angry": "我听见了，先别急。",
+    }
+
     def __init__(self):
         super().__init__(
             capabilities=tts.TTSCapabilities(streaming=True),
@@ -1077,6 +1101,10 @@ class VolcengineLiveTTS(tts.TTS):
             num_channels=1,
         )
         self._client = VolcengineTTSClient()
+        self.emotion_hint = "gentle"
+        self.speed_hint = 1.0
+        self._ack_cache_dir = AUDIO_DIR / "realtime_ack_pcm"
+        self._ack_cache_dir.mkdir(parents=True, exist_ok=True)
 
     @property
     def provider(self) -> str:
@@ -1092,6 +1120,42 @@ class VolcengineLiveTTS(tts.TTS):
     def stream(self, **kwargs) -> tts.SynthesizeStream:
         return VolcengineLiveTTSStream(self, conn_options=kwargs.get("conn_options"))
 
+    def _ack_path(self, emotion: str) -> Path:
+        safe = re.sub(r"[^a-zA-Z0-9_-]", "_", emotion or "gentle")
+        return self._ack_cache_dir / f"{safe}.pcm"
+
+    def cached_ack_pcm(self, emotion: str) -> bytes:
+        path = self._ack_path(self._normalize_ack_emotion(emotion))
+        try:
+            return path.read_bytes() if path.exists() else b""
+        except Exception:
+            return b""
+
+    def _normalize_ack_emotion(self, emotion: str) -> str:
+        if emotion in {"happy", "sad", "angry"}:
+            return emotion
+        return "gentle"
+
+    async def prewarm_ack_cache(self) -> None:
+        if not self.is_available:
+            return
+        for emotion, text in self.ACK_TEXTS.items():
+            path = self._ack_path(emotion)
+            if path.exists() and path.stat().st_size > 0:
+                continue
+            try:
+                path.write_bytes(
+                    await self._client.synthesize_bytes(
+                        text,
+                        speed=0.98,
+                        emotion=emotion,
+                        audio_format="pcm",
+                    )
+                )
+                logger.info("Prewarmed realtime TTS ack: %s", emotion)
+            except Exception as e:
+                logger.warning("Failed to prewarm realtime TTS ack %s: %s", emotion, e)
+
 
 class VolcengineLiveTTSChunkedStream(tts.ChunkedStream):
     def __init__(self, volc_tts_obj: VolcengineLiveTTS, text: str):
@@ -1106,13 +1170,15 @@ class VolcengineLiveTTSChunkedStream(tts.ChunkedStream):
 
     async def _run(self, emitter: tts.AudioEmitter) -> None:
         emotion = detect_emotion(self._text)
+        if emotion in {"gentle", "neutral", "curious"}:
+            emotion = self._tts.emotion_hint
         text = prepare_tts_text(strip_markdown(self._text), emotion)
         if not text:
             text = "嗯"
 
         pcm_data = await self._tts._client.synthesize_bytes(
             text,
-            speed=1.0,
+            speed=self._tts.speed_hint,
             emotion=emotion,
             audio_format="pcm",
         )
@@ -1148,6 +1214,15 @@ class VolcengineLiveTTSStream(tts.SynthesizeStream):
         )
         self._tts = volc_tts_obj
 
+    @staticmethod
+    def _push_pcm(output_emitter: tts.AudioEmitter, pcm_data: bytes) -> None:
+        frame_size = 1920
+        for offset in range(0, len(pcm_data), frame_size):
+            chunk = pcm_data[offset: offset + frame_size]
+            if len(chunk) < frame_size:
+                chunk += b"\x00" * (frame_size - len(chunk))
+            output_emitter.push(chunk)
+
     async def _run(self, output_emitter: tts.AudioEmitter) -> None:
         request_id = str(uuid.uuid4())
         output_emitter.initialize(
@@ -1159,52 +1234,93 @@ class VolcengineLiveTTSStream(tts.SynthesizeStream):
         )
         buffer = ""
         first_audio_ms: Optional[float] = None
+        ack_sent = False
         started = time.perf_counter()
+        ws = None
+        min_segment_chars = int(os.environ.get("VOLCENGINE_TTS_MIN_SEGMENT_CHARS", "6"))
+        max_segment_chars = int(os.environ.get("VOLCENGINE_TTS_MAX_SEGMENT_CHARS", "14"))
 
-        async def synthesize_segment(ws, segment_text: str) -> None:
-            nonlocal first_audio_ms
-            text = prepare_tts_text(strip_markdown(segment_text), detect_emotion(segment_text))
+        def should_flush_segment(text: str) -> bool:
+            stripped = text.strip()
+            if len(stripped) < min_segment_chars:
+                return False
+            if re.search(r"[。！？!?；;，,、]\s*$", stripped):
+                return True
+            return len(stripped) >= max_segment_chars and not is_semantically_incomplete(stripped)
+
+        async def get_ws():
+            nonlocal ws
+            if ws is None:
+                ws = await self._tts._client.open_ws()
+            return ws
+
+        async def synthesize_segment(segment_text: str) -> None:
+            nonlocal first_audio_ms, ack_sent
+            segment_emotion = detect_emotion(segment_text)
+            if segment_emotion in {"gentle", "neutral", "curious"}:
+                segment_emotion = self._tts.emotion_hint
+            text = prepare_tts_text(strip_markdown(segment_text), segment_emotion)
             if not text:
                 return
+
+            if not ack_sent and os.environ.get("VOICEMATE_REALTIME_ACK_ENABLED", "1").lower() not in {"0", "false", "no"}:
+                ack_pcm = self._tts.cached_ack_pcm(segment_emotion)
+                if ack_pcm:
+                    ack_sent = True
+                    if first_audio_ms is None:
+                        first_audio_ms = (time.perf_counter() - started) * 1000
+                        logger.info("TTS cached ack latency=%.0fms emotion=%s", first_audio_ms, segment_emotion)
+                    output_emitter.start_segment(segment_id=str(uuid.uuid4()))
+                    self._push_pcm(output_emitter, ack_pcm)
+                    output_emitter.end_segment()
+
             segment_id = str(uuid.uuid4())
             pcm_data = await self._tts._client.synthesize_bytes_on_ws(
-                ws,
+                await get_ws(),
                 text,
-                speed=1.0,
-                emotion=detect_emotion(text),
+                speed=self._tts.speed_hint,
+                emotion=segment_emotion,
                 audio_format="pcm",
             )
             if first_audio_ms is None:
                 first_audio_ms = (time.perf_counter() - started) * 1000
                 logger.info("TTS first audio latency=%.0fms chars=%d", first_audio_ms, len(text))
             output_emitter.start_segment(segment_id=segment_id)
-            frame_size = 1920
-            for offset in range(0, len(pcm_data), frame_size):
-                chunk = pcm_data[offset: offset + frame_size]
-                if len(chunk) < frame_size:
-                    chunk += b"\x00" * (frame_size - len(chunk))
-                output_emitter.push(chunk)
+            self._push_pcm(output_emitter, pcm_data)
             output_emitter.end_segment()
 
-        async with await self._tts._client.open_ws() as ws:
+        try:
             from volcengine_audio import VolcengineTTSFunctions
 
             async for item in self._input_ch:
                 if isinstance(item, str):
                     buffer += item
-                    if re.search(r"[。！？!?；;]\s*$", buffer) and len(buffer.strip()) >= 4:
-                        await synthesize_segment(ws, buffer)
-                        buffer = ""
+                    while should_flush_segment(buffer):
+                        stripped = buffer.strip()
+                        if re.search(r"[。！？!?；;，,、]\s*$", stripped):
+                            segment = buffer
+                            buffer = ""
+                        else:
+                            segment = buffer[:max_segment_chars]
+                            buffer = buffer[max_segment_chars:]
+                        await synthesize_segment(segment)
+                        if not buffer.strip():
+                            buffer = ""
+                            break
                 else:
                     if buffer.strip():
-                        await synthesize_segment(ws, buffer)
+                        await synthesize_segment(buffer)
                         buffer = ""
                     output_emitter.flush()
 
             if buffer.strip():
-                await synthesize_segment(ws, buffer)
-            await ws.send(VolcengineTTSFunctions.finish_connection_payload())
+                await synthesize_segment(buffer)
+            if ws is not None:
+                await ws.send(VolcengineTTSFunctions.finish_connection_payload())
             output_emitter.flush()
+        finally:
+            if ws is not None:
+                await ws.close()
 
 
 class SilentLiveTTS(tts.TTS):
@@ -1345,6 +1461,7 @@ class VoiceMateAgent(Agent):
         self._conv_id = str(uuid.uuid4())[:8]
         self._ctx = ctx
         self._last_user_text = ""
+        self._last_analysis = companion_orchestrator.analyze("")
 
         instructions = companion_orchestrator.system_prompt(
             self._persona,
@@ -1381,16 +1498,16 @@ class VoiceMateAgent(Agent):
             stt=self._whisper_stt,
             vad=silero.VAD.load(
                 min_speech_duration=float(os.environ.get("VOICEMATE_SILERO_MIN_SPEECH_SECONDS", "0.12")),
-                min_silence_duration=float(os.environ.get("VOICEMATE_SILERO_MIN_SILENCE_SECONDS", "0.55")),
-                prefix_padding_duration=float(os.environ.get("VOICEMATE_SILERO_PREFIX_PADDING_SECONDS", "0.30")),
+                min_silence_duration=float(os.environ.get("VOICEMATE_SILERO_MIN_SILENCE_SECONDS", "0.38")),
+                prefix_padding_duration=float(os.environ.get("VOICEMATE_SILERO_PREFIX_PADDING_SECONDS", "0.24")),
                 activation_threshold=float(os.environ.get("VOICEMATE_SILERO_ACTIVATION_THRESHOLD", "0.45")),
             ),
             llm=self._deepseek_llm,
             tts=self._active_tts,
             allow_interruptions=True,       # Barge-in
-            min_endpointing_delay=float(os.environ.get("VOICEMATE_MIN_ENDPOINTING_DELAY", "0.55")),
-            max_endpointing_delay=float(os.environ.get("VOICEMATE_MAX_ENDPOINTING_DELAY", "1.25")),
-            min_consecutive_speech_delay=float(os.environ.get("VOICEMATE_MIN_CONSECUTIVE_SPEECH_DELAY", "0.35")),
+            min_endpointing_delay=float(os.environ.get("VOICEMATE_MIN_ENDPOINTING_DELAY", "0.35")),
+            max_endpointing_delay=float(os.environ.get("VOICEMATE_MAX_ENDPOINTING_DELAY", "0.85")),
+            min_consecutive_speech_delay=float(os.environ.get("VOICEMATE_MIN_CONSECUTIVE_SPEECH_DELAY", "0.25")),
             **kwargs,
         )
 
@@ -1422,7 +1539,17 @@ class VoiceMateAgent(Agent):
         user_text = user_text.strip()
         if user_text:
             self._last_user_text = user_text
+            self._last_analysis = companion_orchestrator.analyze(user_text)
+            self._volc_tts.emotion_hint = self._last_analysis.tts_emotion
+            self._volc_tts.speed_hint = self._last_analysis.tts_speed
             await self._publish_call_event("user_transcript", text=user_text, is_final=True)
+            await self._publish_call_event(
+                "emotion_state",
+                emotion=self._last_analysis.emotion,
+                label=self._last_analysis.status_label,
+                intensity=self._last_analysis.intensity,
+                need=self._last_analysis.need,
+            )
             if self._whisper_stt.last_asr_latency_ms is not None:
                 await self._publish_call_event("metrics", label="ASR", value_ms=self._whisper_stt.last_asr_latency_ms)
             await self._publish_call_event("call_state", state="thinking")
@@ -1541,6 +1668,11 @@ def main():
     logger.info(f"  TTS Voice: {TTS_VOICE}")
     logger.info(f"  Persona: {DEFAULT_PERSONA}")
     logger.info(f"  Barge-in: enabled")
+    if os.environ.get("VOICEMATE_PREWARM_TTS_ACKS", "1").lower() not in {"0", "false", "no"}:
+        try:
+            asyncio.run(VolcengineLiveTTS().prewarm_ack_cache())
+        except Exception as e:
+            logger.warning("Realtime TTS ack prewarm failed: %s", e)
 
     cli.run_app(
         WorkerOptions(

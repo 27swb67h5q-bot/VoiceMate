@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 import LiveKit
 import SwiftUI
 
@@ -11,6 +12,7 @@ final class LiveKitCallService: NSObject, ObservableObject {
     @Published var errorMessage: String?
     @Published var transcript: [(isUser: Bool, text: String)] = []
     @Published var metricsText: String?
+    @Published var emotionText: String?
 
     private let serverHost: String
     private let serverPort: String
@@ -50,10 +52,12 @@ final class LiveKitCallService: NSObject, ObservableObject {
         isAISpeaking = false
         statusText = "通话结束"
         callDuration = 0
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
     private func connect() async {
         do {
+            try configureCallAudioSession()
             let token = try await fetchToken()
             let room = Room(delegate: self)
             self.room = room
@@ -87,6 +91,17 @@ final class LiveKitCallService: NSObject, ObservableObject {
                 self.errorMessage = error.localizedDescription
             }
         }
+    }
+
+    private func configureCallAudioSession() throws {
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(
+            .playAndRecord,
+            mode: .voiceChat,
+            options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP]
+        )
+        try session.setPreferredIOBufferDuration(0.01)
+        try session.setActive(true)
     }
 
     private func fetchToken() async throws -> LiveKitTokenResponse {
@@ -144,6 +159,11 @@ final class LiveKitCallService: NSObject, ObservableObject {
                 if let label = object["label"] as? String,
                    let value = object["value_ms"] as? Double {
                     self.metricsText = "\(label) \(Int(value))ms"
+                }
+            case "emotion_state":
+                if let label = object["label"] as? String {
+                    self.emotionText = label
+                    self.statusText = label
                 }
             case "ai_turn_complete":
                 self.isAISpeaking = false

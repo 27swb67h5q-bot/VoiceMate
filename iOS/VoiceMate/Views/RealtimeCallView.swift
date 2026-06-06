@@ -57,6 +57,11 @@ struct RealtimeCallView: View {
                         .font(.caption)
                         .foregroundStyle(.white.opacity(0.48))
                 }
+                if let emotion = service.emotionText {
+                    Text(emotion)
+                        .font(.footnote.weight(.medium))
+                        .foregroundStyle(.green.opacity(0.85))
+                }
             }
 
             if let error = service.errorMessage {

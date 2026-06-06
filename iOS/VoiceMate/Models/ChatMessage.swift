@@ -38,6 +38,9 @@ struct ChatResponse: Codable {
     let conversationId: String
     let durationMs: Int
     let emotion: String?
+    let emotionLabel: String?
+    let emotionIntensity: Int?
+    let need: String?
 
     enum CodingKeys: String, CodingKey {
         case replyText = "reply_text"
@@ -45,6 +48,9 @@ struct ChatResponse: Codable {
         case conversationId = "conversation_id"
         case durationMs = "duration_ms"
         case emotion
+        case emotionLabel = "emotion_label"
+        case emotionIntensity = "emotion_intensity"
+        case need
     }
 }
 

@@ -178,6 +178,9 @@ class ChatResponse(BaseModel):
     conversation_id: str
     duration_ms: int = 0
     emotion: str = "gentle"
+    emotion_label: str = "在听你说"
+    emotion_intensity: int = 1
+    need: str = "conversation"
 
 
 class CloneVoiceResponse(BaseModel):
@@ -244,6 +247,14 @@ def clean_text(text: str) -> str:
 def detect_emotion(text: str) -> str:
     if re.search(r"[?？]", text):
         return "curious"
+    if any(word in text for word in ("焦虑", "慌", "担心", "紧张", "睡不着")):
+        return "anxious"
+    if any(word in text for word in ("孤独", "没人陪", "一个人", "没人懂")):
+        return "lonely"
+    if any(word in text for word in ("生气", "气死", "火大", "不爽")):
+        return "angry"
+    if any(word in text for word in ("想你", "抱抱", "陪我", "喜欢你", "爱你")):
+        return "affectionate"
     if any(word in text for word in ("开心", "高兴", "哈哈", "喜欢")):
         return "cheerful"
     if any(word in text for word in ("难过", "烦", "累", "痛苦", "崩")):
@@ -266,7 +277,11 @@ def volc_emotion(emotion: str) -> Optional[str]:
     return {
         "cheerful": "happy",
         "curious": "happy",
+        "affectionate": "happy",
         "comforting": "sad",
+        "anxious": "sad",
+        "lonely": "sad",
+        "angry": "angry",
     }.get(emotion)
 
 
@@ -464,7 +479,14 @@ class TTSEngine:
     def __init__(self):
         self._volc = VolcengineTTSClient()
 
-    async def synthesize(self, text: str, voice: Optional[str], speed: Optional[float]) -> tuple[Path, int]:
+    async def synthesize(
+        self,
+        text: str,
+        voice: Optional[str],
+        speed: Optional[float],
+        emotion: Optional[str] = None,
+        emotion_speed: Optional[float] = None,
+    ) -> tuple[Path, int]:
         audio_id = uuid.uuid4().hex[:16]
         output = AUDIO_DIR / f"{audio_id}.mp3"
         text = prepare_tts_text(text)
@@ -480,8 +502,8 @@ class TTSEngine:
                     await self._volc.synthesize_bytes(
                         text,
                         voice=voice,
-                        speed=speed,
-                        emotion=detect_emotion(text),
+                        speed=(speed or 1.0) * (emotion_speed or 1.0),
+                        emotion=emotion or detect_emotion(text),
                         audio_format="mp3",
                     )
                 )
@@ -528,11 +550,19 @@ async def chat(request: ChatRequest):
 
     conversation_id = request.conversation_id or uuid.uuid4().hex
     persona = request.persona or DEFAULT_PERSONA
+    analysis = companion_orchestrator.analyze(text)
     reply = await llm.reply(text, conversation_id, persona)
-    emotion = detect_emotion(reply)
-    audio_path, duration_ms = await tts.synthesize(reply, request.voice, request.speed)
+    reply_emotion = detect_emotion(reply)
+    tts_emotion = analysis.tts_emotion if analysis.emotion != "neutral" else reply_emotion
+    audio_path, duration_ms = await tts.synthesize(
+        reply,
+        request.voice,
+        request.speed,
+        emotion=tts_emotion,
+        emotion_speed=analysis.tts_speed,
+    )
     history_store.append(conversation_id, text, reply)
-    analysis = companion_orchestrator.record_turn(
+    recorded = companion_orchestrator.record_turn(
         conversation_id=conversation_id,
         user_text=text,
         assistant_text=reply,
@@ -542,7 +572,10 @@ async def chat(request: ChatRequest):
         audio_url=audio_url(audio_path),
         conversation_id=conversation_id,
         duration_ms=duration_ms,
-        emotion=analysis.emotion if analysis.emotion != "neutral" else emotion,
+        emotion=recorded.emotion if recorded.emotion != "neutral" else reply_emotion,
+        emotion_label=recorded.status_label,
+        emotion_intensity=recorded.intensity,
+        need=recorded.need,
     )
 
 
