@@ -112,6 +112,9 @@ LIVEKIT_API_KEY = os.environ.get("LIVEKIT_API_KEY", "")
 LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "")
 LIVEKIT_AGENT_NAME = os.environ.get("LIVEKIT_AGENT_NAME", "VoiceMate")
 LLM_MAX_TOKENS = int(os.environ.get("VOICEMATE_LLM_MAX_TOKENS", "140"))
+REALTIME_ONE_SENTENCE = os.environ.get("VOICEMATE_REALTIME_ONE_SENTENCE", "1").lower() not in {"0", "false", "no"}
+REALTIME_MAX_REPLY_CHARS = int(os.environ.get("VOICEMATE_REALTIME_MAX_REPLY_CHARS", "32"))
+REALTIME_MIN_REPLY_CHARS = int(os.environ.get("VOICEMATE_REALTIME_MIN_REPLY_CHARS", "8"))
 REALTIME_TTS_PROVIDER = "volcengine"
 ASR_PROVIDER = "volcengine"
 VOLCENGINE_ASR_WS_URL = os.environ.get(
@@ -816,6 +819,31 @@ class DeepSeekLLMStream(llm.LLMStream):
             ))
 
 
+def _trim_realtime_delta(current_text: str, delta_text: str) -> tuple[str, bool]:
+    """Keep realtime calls to one short spoken sentence."""
+    if not REALTIME_ONE_SENTENCE:
+        return delta_text, False
+
+    combined = current_text + delta_text
+    stop_at: Optional[int] = None
+    for match in re.finditer(r"[。！？!?]", combined):
+        if match.end() >= REALTIME_MIN_REPLY_CHARS:
+            stop_at = match.end()
+            break
+
+    if stop_at is None and len(combined) >= REALTIME_MAX_REPLY_CHARS:
+        stop_at = REALTIME_MAX_REPLY_CHARS
+
+    if stop_at is None:
+        return delta_text, False
+
+    target = combined[:stop_at].rstrip("，,、；;：: ")
+    if target and target[-1] not in "。！？!?":
+        target += "。"
+    emit = target[len(current_text):]
+    return emit, True
+
+
 class VolcengineLiveTTS(tts.TTS):
     """LiveKit TTS adapter for Volcengine V3 bidirectional TTS."""
 
@@ -967,6 +995,7 @@ class VolcengineLiveTTSStream(tts.SynthesizeStream):
         buffer = ""
         first_audio_ms: Optional[float] = None
         ack_sent = False
+        segment_started = False
         started = time.perf_counter()
         ws = None
         min_segment_chars = int(os.environ.get("VOLCENGINE_TTS_MIN_SEGMENT_CHARS", "6"))
@@ -986,8 +1015,30 @@ class VolcengineLiveTTSStream(tts.SynthesizeStream):
                 ws = await self._tts._client.open_ws()
             return ws
 
-        async def synthesize_segment(segment_text: str) -> None:
+        def ensure_output_segment() -> None:
+            nonlocal segment_started
+            if not segment_started:
+                output_emitter.start_segment(segment_id=str(uuid.uuid4()))
+                segment_started = True
+
+        def push_cached_ack(emotion: str) -> None:
             nonlocal first_audio_ms, ack_sent
+            if ack_sent or os.environ.get("VOICEMATE_REALTIME_ACK_ENABLED", "1").lower() in {"0", "false", "no"}:
+                return
+            ack_pcm = self._tts.cached_ack_pcm(emotion)
+            if not ack_pcm:
+                return
+            ack_sent = True
+            ensure_output_segment()
+            if first_audio_ms is None:
+                first_audio_ms = (time.perf_counter() - started) * 1000
+                logger.info("TTS cached ack latency=%.0fms emotion=%s", first_audio_ms, emotion)
+                metrics_store.record("realtime_tts_ack", first_audio_ms, {"emotion": emotion})
+            self._push_pcm(output_emitter, ack_pcm)
+            output_emitter.flush()
+
+        async def synthesize_segment(segment_text: str) -> None:
+            nonlocal first_audio_ms
             segment_emotion = detect_emotion(segment_text)
             if segment_emotion in {"gentle", "neutral", "curious"}:
                 segment_emotion = self._tts.emotion_hint
@@ -995,19 +1046,6 @@ class VolcengineLiveTTSStream(tts.SynthesizeStream):
             if not text:
                 return
 
-            if not ack_sent and os.environ.get("VOICEMATE_REALTIME_ACK_ENABLED", "1").lower() not in {"0", "false", "no"}:
-                ack_pcm = self._tts.cached_ack_pcm(segment_emotion)
-                if ack_pcm:
-                    ack_sent = True
-                    if first_audio_ms is None:
-                        first_audio_ms = (time.perf_counter() - started) * 1000
-                        logger.info("TTS cached ack latency=%.0fms emotion=%s", first_audio_ms, segment_emotion)
-                        metrics_store.record("realtime_tts_ack", first_audio_ms, {"emotion": segment_emotion})
-                    output_emitter.start_segment(segment_id=str(uuid.uuid4()))
-                    self._push_pcm(output_emitter, ack_pcm)
-                    output_emitter.end_segment()
-
-            segment_id = str(uuid.uuid4())
             pcm_data = await self._tts._client.synthesize_bytes_on_ws(
                 await get_ws(),
                 text,
@@ -1019,12 +1057,15 @@ class VolcengineLiveTTSStream(tts.SynthesizeStream):
                 first_audio_ms = (time.perf_counter() - started) * 1000
                 logger.info("TTS first audio latency=%.0fms chars=%d", first_audio_ms, len(text))
                 metrics_store.record("realtime_tts_first_audio", first_audio_ms, {"emotion": segment_emotion})
-            output_emitter.start_segment(segment_id=segment_id)
+            ensure_output_segment()
             self._push_pcm(output_emitter, pcm_data)
-            output_emitter.end_segment()
+            output_emitter.flush()
 
         try:
             from volcengine_audio import VolcengineTTSFunctions
+
+            initial_emotion = self._tts._normalize_ack_emotion(self._tts.emotion_hint)
+            push_cached_ack(initial_emotion)
 
             async for item in self._input_ch:
                 if isinstance(item, str):
@@ -1051,6 +1092,8 @@ class VolcengineLiveTTSStream(tts.SynthesizeStream):
                 await synthesize_segment(buffer)
             if ws is not None:
                 await ws.send(VolcengineTTSFunctions.finish_connection_payload())
+            if segment_started:
+                output_emitter.end_segment()
             output_emitter.flush()
         finally:
             if ws is not None:
@@ -1241,19 +1284,34 @@ class VoiceMateAgent(Agent):
             tool_choice=tool_choice,
         )
         full_text: list[str] = []
+        spoken_text = ""
         llm_started = time.perf_counter()
         first_token_ms: Optional[float] = None
         async with stream:
             async for chunk in stream:
                 if chunk.delta and chunk.delta.content:
+                    content, should_stop = _trim_realtime_delta(spoken_text, chunk.delta.content)
+                    if not content:
+                        if should_stop:
+                            break
+                        continue
                     if first_token_ms is None:
                         first_token_ms = (time.perf_counter() - llm_started) * 1000
                         logger.info("LLM first token latency=%.0fms [%s]", first_token_ms, self._conv_id)
                         metrics_store.record("realtime_llm_first_token", first_token_ms)
                         await self._publish_call_event("metrics", label="LLM", value_ms=first_token_ms)
                         await self._publish_call_event("call_state", state="speaking")
-                    full_text.append(chunk.delta.content)
-                yield chunk
+                    spoken_text += content
+                    full_text.append(content)
+                    yield llm.ChatChunk(
+                        id=chunk.id or str(uuid.uuid4()),
+                        delta=llm.ChoiceDelta(role="assistant", content=content),
+                    )
+                    if should_stop:
+                        logger.info("Realtime LLM clipped to one sentence chars=%d [%s]", len(spoken_text), self._conv_id)
+                        break
+                else:
+                    yield chunk
         reply = "".join(full_text).strip()
         if reply:
             full_response_ms = (time.perf_counter() - llm_started) * 1000
