@@ -105,3 +105,31 @@ struct LiveKitTokenResponse: Codable {
     let room: String
     let url: String?
 }
+
+struct RTCSessionResponse: Codable {
+    let provider: String
+    let token: String
+    let room: String?
+    let url: String?
+    let appId: String?
+    let roomId: String?
+    let userId: String?
+    let taskId: String?
+    let businessId: String?
+    let configured: Bool?
+    let needs: [String]?
+
+    enum CodingKeys: String, CodingKey {
+        case provider
+        case token
+        case room
+        case url
+        case appId = "app_id"
+        case roomId = "room_id"
+        case userId = "user_id"
+        case taskId = "task_id"
+        case businessId = "business_id"
+        case configured
+        case needs
+    }
+}

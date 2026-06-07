@@ -258,6 +258,8 @@ class VolcengineStreamingASRClient:
         sequence = 1
         frame_bytes = int(sample_rate * 0.10) * 2
         timeout = float(os.environ.get("VOLCENGINE_ASR_TIMEOUT_SECONDS", "18"))
+        quick_final_ms = int(os.environ.get("VOLCENGINE_ASR_QUICK_FINAL_MS", "450"))
+        max_wait_after_flush_ms = int(os.environ.get("VOLCENGINE_ASR_MAX_WAIT_AFTER_FLUSH_MS", "1800"))
 
         async with await self._connect(websockets, self.ws_url, self._headers()) as ws:
             await ws.send(VolcengineAsrFunctionsV3.generate_asr_full_client_request(sequence, request, compression=True))
@@ -283,10 +285,25 @@ class VolcengineStreamingASRClient:
 
             if not final_text:
                 await ws.send(VolcengineAsrFunctionsV3.generate_asr_audio_only_request(sequence, b"", compress=False))
+                flush_started = time.perf_counter()
+                latest_changed_at = 0.0
                 while True:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+                    elapsed_ms = (time.perf_counter() - flush_started) * 1000
+                    if latest_text and latest_changed_at > 0 and (time.perf_counter() - latest_changed_at) * 1000 >= quick_final_ms:
+                        final_text = latest_text
+                        break
+                    if latest_text and elapsed_ms >= max_wait_after_flush_ms:
+                        final_text = latest_text
+                        break
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=min(timeout, 0.20))
+                    except asyncio.TimeoutError:
+                        continue
                     parsed = VolcengineAsrFunctionsV3.parse_response(raw)
-                    latest_text = self._extract_text(parsed) or latest_text
+                    text = self._extract_text(parsed)
+                    if text and text != latest_text:
+                        latest_text = text
+                        latest_changed_at = time.perf_counter()
                     if parsed.get("is_last_package"):
                         final_text = latest_text
                         break
@@ -929,6 +946,7 @@ class VolcengineLiveTTSChunkedStream(tts.ChunkedStream):
         self._text = text
 
     async def _run(self, emitter: tts.AudioEmitter) -> None:
+        started = time.perf_counter()
         emotion = detect_emotion(self._text)
         if emotion in {"gentle", "neutral", "curious"}:
             emotion = self._tts.emotion_hint
@@ -942,6 +960,9 @@ class VolcengineLiveTTSChunkedStream(tts.ChunkedStream):
             emotion=emotion,
             audio_format="pcm",
         )
+        latency_ms = (time.perf_counter() - started) * 1000
+        logger.info("TTS chunked latency=%.0fms chars=%d emotion=%s", latency_ms, len(text), emotion)
+        metrics_store.record("realtime_tts_chunked", latency_ms, {"emotion": emotion})
         if not pcm_data:
             return
 

@@ -2,7 +2,7 @@ import SwiftUI
 
 struct RealtimeCallView: View {
     @Environment(\.dismiss) private var dismiss
-    @StateObject private var service: LiveKitCallService
+    @StateObject private var service: VolcengineRTCCallService
 
     let onTranscript: ([(isUser: Bool, text: String)]) -> Void
     let onTurnCompleted: (_ isUser: Bool, _ text: String) -> Void
@@ -16,7 +16,7 @@ struct RealtimeCallView: View {
         onTranscript: @escaping ([(isUser: Bool, text: String)]) -> Void = { _ in },
         onTurnCompleted: @escaping (_ isUser: Bool, _ text: String) -> Void = { _, _ in }
     ) {
-        let callService = LiveKitCallService(
+        let callService = VolcengineRTCCallService(
             serverHost: serverHost,
             serverPort: serverPort,
             voice: voice,

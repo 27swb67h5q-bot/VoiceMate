@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 
 from metrics_store import MetricsStore
 from orchestrator import CompanionOrchestrator
+from volcengine_rtc import VolcengineRTCConfig, VolcengineRTCService
 
 load_dotenv()
 
@@ -207,6 +208,39 @@ class LiveKitTokenRequest(BaseModel):
     speed: Optional[float] = 1.0
 
 
+class RTCSessionRequest(BaseModel):
+    room: Optional[str] = None
+    identity: Optional[str] = None
+    voice: Optional[str] = None
+    persona: Optional[str] = None
+    speed: Optional[float] = 1.0
+
+
+class VolcengineVoiceChatStartRequest(BaseModel):
+    room_id: str
+    task_id: Optional[str] = None
+    voice: Optional[str] = None
+    persona: Optional[str] = None
+    speed: Optional[float] = 1.0
+
+
+class VolcengineVoiceChatStopRequest(BaseModel):
+    room_id: str
+    task_id: str
+
+
+class VolcengineCustomLLMRequest(BaseModel):
+    text: Optional[str] = None
+    query: Optional[str] = None
+    content: Optional[str] = None
+    conversation_id: Optional[str] = None
+    user_id: Optional[str] = None
+    persona: Optional[str] = None
+    messages: Optional[list[dict[str, Any]]] = None
+    history: Optional[list[dict[str, Any]]] = None
+    extra: Optional[dict[str, Any]] = None
+
+
 class ConversationStore:
     def __init__(self, root: Path):
         self.root = root
@@ -242,6 +276,7 @@ class ConversationStore:
 history_store = ConversationStore(HISTORY_DIR)
 companion_orchestrator = CompanionOrchestrator(MEMORY_DIR)
 metrics_store = MetricsStore(MEMORY_DIR)
+volcengine_rtc = VolcengineRTCService(VolcengineRTCConfig.from_env())
 
 
 def clean_text(text: str) -> str:
@@ -716,19 +751,161 @@ async def livekit_token(request: Optional[LiveKitTokenRequest] = None):
     return {"token": token, "room": room_name, "url": LIVEKIT_URL}
 
 
+@app.post("/v1/rtc/session")
+async def rtc_session(request: Optional[RTCSessionRequest] = None):
+    provider = VOICEMATE_RTC_PROVIDER
+    if provider == "volcengine":
+        try:
+            return await volcengine_rtc.create_client_session(
+                room_id=request.room if request else None,
+                user_id=request.identity if request else None,
+                persona=request.persona if request else None,
+                voice=normalize_volcengine_voice(request.voice if request else None),
+                speed=request.speed if request else 1.0,
+            )
+        except Exception as exc:
+            logger.exception("Volcengine RTC session failed")
+            raise HTTPException(status_code=500, detail=f"Volcengine RTC session failed: {exc}") from exc
+
+    token = await livekit_token(
+        LiveKitTokenRequest(
+            room=request.room if request else None,
+            identity=request.identity if request else None,
+            voice=request.voice if request else None,
+            persona=request.persona if request else None,
+            speed=request.speed if request else 1.0,
+        )
+    )
+    return {"provider": "livekit", **token}
+
+
+@app.post("/v1/volcengine/voice-chat/start")
+async def volcengine_voice_chat_start(request: VolcengineVoiceChatStartRequest):
+    try:
+        return await volcengine_rtc.start_voice_chat(
+            room_id=request.room_id,
+            task_id=request.task_id,
+            persona=request.persona,
+            voice=normalize_volcengine_voice(request.voice),
+            speed=request.speed,
+        )
+    except Exception as exc:
+        logger.exception("Volcengine StartVoiceChat failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/v1/volcengine/voice-chat/update")
+async def volcengine_voice_chat_update(payload: dict[str, Any]):
+    try:
+        return await volcengine_rtc.update_voice_chat(payload)
+    except Exception as exc:
+        logger.exception("Volcengine UpdateVoiceChat failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/v1/volcengine/voice-chat/stop")
+async def volcengine_voice_chat_stop(request: VolcengineVoiceChatStopRequest):
+    try:
+        return await volcengine_rtc.stop_voice_chat(room_id=request.room_id, task_id=request.task_id)
+    except Exception as exc:
+        logger.exception("Volcengine StopVoiceChat failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def _extract_custom_llm_text(payload: VolcengineCustomLLMRequest | dict[str, Any]) -> str:
+    data = payload.model_dump() if isinstance(payload, VolcengineCustomLLMRequest) else payload
+    for key in ("text", "query", "content", "input", "prompt"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return clean_text(value)
+
+    for key in ("messages", "history"):
+        messages = data.get(key)
+        if not isinstance(messages, list):
+            continue
+        for message in reversed(messages):
+            if not isinstance(message, dict):
+                continue
+            role = str(message.get("role") or message.get("Role") or "").lower()
+            content = message.get("content") or message.get("Content") or message.get("text")
+            if role in {"user", "human"} and isinstance(content, str) and content.strip():
+                return clean_text(content)
+            if isinstance(content, list):
+                parts = [item.get("text", "") for item in content if isinstance(item, dict)]
+                joined = clean_text(" ".join(parts))
+                if role in {"user", "human"} and joined:
+                    return joined
+    return ""
+
+
+def _custom_llm_conversation_id(payload: VolcengineCustomLLMRequest | dict[str, Any]) -> str:
+    data = payload.model_dump() if isinstance(payload, VolcengineCustomLLMRequest) else payload
+    for key in ("conversation_id", "ConversationId", "dialog_id", "room_id", "RoomId", "user_id", "UserId"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return re.sub(r"[^a-zA-Z0-9_-]", "", value)[:96] or "volcengine"
+    return "volcengine"
+
+
+@app.post("/v1/volcengine/custom-llm")
+async def volcengine_custom_llm(payload: dict[str, Any]):
+    text = _extract_custom_llm_text(payload)
+    if not text:
+        return {
+            "content": "我在，继续说。",
+            "text": "我在，继续说。",
+            "reply": "我在，继续说。",
+            "finish": True,
+        }
+
+    conversation_id = _custom_llm_conversation_id(payload)
+    extra = payload.get("extra") if isinstance(payload.get("extra"), dict) else {}
+    persona = payload.get("persona") or payload.get("Persona") or extra.get("persona") or DEFAULT_PERSONA
+    analysis = companion_orchestrator.analyze(text)
+    started = metrics_store.timer("volcengine_custom_llm")
+    reply = await llm.reply(text, conversation_id, str(persona))
+    recorded = companion_orchestrator.record_turn(
+        conversation_id=conversation_id,
+        user_text=text,
+        assistant_text=reply,
+    )
+    started.stop(emotion=recorded.emotion)
+    logger.info(
+        "Volcengine CustomLLM reply conversation=%s emotion=%s chars=%d",
+        conversation_id,
+        recorded.emotion,
+        len(reply),
+    )
+    return {
+        "content": reply,
+        "text": reply,
+        "reply": reply,
+        "message": {"role": "assistant", "content": reply},
+        "emotion": recorded.emotion if recorded.emotion != "neutral" else analysis.emotion,
+        "emotion_label": recorded.status_label,
+        "tts": {
+            "emotion": analysis.tts_emotion,
+            "speed": analysis.tts_speed,
+        },
+        "finish": True,
+    }
+
+
 @app.get("/v1/monitor/summary")
 async def monitor_summary(window_seconds: int = 3600):
+    volc_caps = volcengine_rtc.capabilities()
     return {
         "status": "ok",
         "rtc_provider": VOICEMATE_RTC_PROVIDER,
         "targets": {
             "first_ack_ms": 300,
-            "full_turn_ms": 1800,
+            "full_turn_ms": 1200 if VOICEMATE_RTC_PROVIDER == "volcengine" else 1800,
         },
         "metrics": metrics_store.summary(window_seconds=window_seconds),
         "voice": VOLCENGINE_TTS_VOICE_TYPE,
         "livekit_url": LIVEKIT_URL,
-        "volcengine_rtc_configured": bool(VOLCENGINE_RTC_APP_ID and (VOLCENGINE_RTC_APP_KEY or VOLCENGINE_RTC_TOKEN_URL)),
+        "volcengine_rtc_configured": volc_caps["configured"],
+        "volcengine_rtc": volc_caps,
     }
 
 
@@ -792,19 +969,18 @@ async def monitor_page():
 
 @app.get("/v1/rtc/capabilities")
 async def rtc_capabilities():
+    volc_caps = volcengine_rtc.capabilities()
     return {
         "active_provider": VOICEMATE_RTC_PROVIDER,
         "livekit": {
             "configured": bool(LIVEKIT_URL and LIVEKIT_API_KEY and LIVEKIT_API_SECRET),
             "url": LIVEKIT_URL,
-            "role": "active",
+            "role": "active" if VOICEMATE_RTC_PROVIDER == "livekit" else "fallback",
         },
         "volcengine_rtc": {
-            "configured": bool(VOLCENGINE_RTC_APP_ID and (VOLCENGINE_RTC_APP_KEY or VOLCENGINE_RTC_TOKEN_URL)),
-            "app_id_present": bool(VOLCENGINE_RTC_APP_ID),
-            "token_url_present": bool(VOLCENGINE_RTC_TOKEN_URL),
-            "role": "prepared",
-            "note": "iOS Volcengine RTC SDK and token service are required before replacing LiveKit media transport.",
+            **volc_caps,
+            "role": "active" if VOICEMATE_RTC_PROVIDER == "volcengine" else "prepared",
+            "note": "Switch VOICEMATE_RTC_PROVIDER=volcengine after AppId, token generation and iOS SDK integration are ready.",
         },
     }
 

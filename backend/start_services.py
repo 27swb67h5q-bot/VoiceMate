@@ -105,26 +105,33 @@ def main() -> int:
 
     env = load_env()
     stop_old_processes()
+    rtc_provider = env.get("VOICEMATE_RTC_PROVIDER", "livekit").strip().lower()
 
     start_process("api", [str(PYTHON), str(BACKEND / "server.py")], BACKEND, env, "api.out.log", "api.err.log")
-    time.sleep(2)
-    start_process(
-        "livekit",
-        [str(LIVEKIT_EXE), "--config", str(LIVEKIT_CONFIG), "--node-ip", env["LIVEKIT_HOST"]],
-        LIVEKIT_DIR,
-        env,
-        "livekit.out.log",
-        "livekit.err.log",
-    )
-    time.sleep(2)
-    start_process("agent", [str(PYTHON), str(BACKEND / "livekit_agent.py"), "start"], BACKEND, env, "agent.out.log", "agent.err.log")
+    if rtc_provider == "livekit":
+        time.sleep(2)
+        start_process(
+            "livekit",
+            [str(LIVEKIT_EXE), "--config", str(LIVEKIT_CONFIG), "--node-ip", env["LIVEKIT_HOST"]],
+            LIVEKIT_DIR,
+            env,
+            "livekit.out.log",
+            "livekit.err.log",
+        )
+        time.sleep(2)
+        start_process("agent", [str(PYTHON), str(BACKEND / "livekit_agent.py"), "start"], BACKEND, env, "agent.out.log", "agent.err.log")
+    else:
+        print(f"skipped livekit/agent because VOICEMATE_RTC_PROVIDER={rtc_provider}")
     time.sleep(5)
 
     print("running VoiceMate processes:")
     for pid, name, command in list_voice_mate_processes():
         print(f"{pid} {name} {command}")
     print("health: http://127.0.0.1:8000/v1/health")
-    print(f"livekit: ws://{env['LIVEKIT_HOST']}:{env['LIVEKIT_PORT']}")
+    if rtc_provider == "livekit":
+        print(f"livekit: ws://{env['LIVEKIT_HOST']}:{env['LIVEKIT_PORT']}")
+    else:
+        print("rtc: volcengine")
     return 0
 
 

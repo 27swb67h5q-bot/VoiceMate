@@ -60,6 +60,14 @@ final class LiveKitCallService: NSObject, ObservableObject {
         do {
             try configureCallAudioSession()
             let token = try await fetchToken()
+            guard token.provider == "livekit" else {
+                let missing = token.needs?.joined(separator: ", ") ?? "Volcengine RTC iOS SDK"
+                throw NSError(
+                    domain: "VoiceMateRTC",
+                    code: 1001,
+                    userInfo: [NSLocalizedDescriptionKey: "Volcengine RTC 尚未完成 iOS SDK 接入：\(missing)"]
+                )
+            }
             let room = Room(delegate: self)
             self.room = room
 
@@ -106,8 +114,8 @@ final class LiveKitCallService: NSObject, ObservableObject {
         try session.setActive(true)
     }
 
-    private func fetchToken() async throws -> LiveKitTokenResponse {
-        let url = URL(string: "http://\(serverHost):\(serverPort)/v1/livekit/token")!
+    private func fetchToken() async throws -> RTCSessionResponse {
+        let url = URL(string: "http://\(serverHost):\(serverPort)/v1/rtc/session")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -120,7 +128,7 @@ final class LiveKitCallService: NSObject, ObservableObject {
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw VoiceMateLiveKitError.invalidTokenResponse
         }
-        return try JSONDecoder().decode(LiveKitTokenResponse.self, from: data)
+        return try JSONDecoder().decode(RTCSessionResponse.self, from: data)
     }
 
     private func startTimer() {

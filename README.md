@@ -79,19 +79,31 @@ Install the IPA with TrollStore.
 
 ## Realtime Voice
 
-Realtime calls use LiveKit:
+The project now has one RTC session entrypoint:
+
+```text
+iOS -> /v1/rtc/session -> selected RTC provider
+```
+
+`VOICEMATE_RTC_PROVIDER=livekit` keeps the LAN fallback path:
 
 ```text
 iOS microphone -> LiveKit -> backend agent -> Volcengine ASR -> LLM -> Volcengine TTS -> LiveKit -> iOS speaker
 ```
 
-The backend publishes realtime transcripts back to the app so call turns can be shown in the chat panel.
+`VOICEMATE_RTC_PROVIDER=volcengine` is the target low-latency path:
 
-## Volcengine RTC Readiness
+```text
+iOS -> Volcengine RTC / real-time conversational AI -> backend CustomLLM -> Volcengine TTS -> iOS
+```
 
-LiveKit remains the active LAN RTC provider. Volcengine RTC configuration keys
-are present in `backend/.env.example` and exposed through
-`/v1/rtc/capabilities`, but replacing LiveKit requires the Volcengine iOS RTC
-SDK frameworks and a valid room token service. Until those are supplied, the
-project keeps LiveKit active and applies WebRTC AEC/AGC/NS plus low-buffer audio
-settings for weak-network and echo control.
+The backend exposes:
+
+- `POST /v1/rtc/session`: unified call session bootstrap.
+- `GET /v1/rtc/capabilities`: current provider and missing Volcengine fields.
+- `POST /v1/volcengine/custom-llm`: CustomLLM callback for persona, emotion and memory.
+- `POST /v1/volcengine/voice-chat/start|update|stop`: server-side OpenAPI bridge.
+
+Volcengine RTC requires the service to be enabled in the Volcengine console,
+plus RTC AppId, token generation and iOS SDK integration before it can fully
+replace LiveKit media transport.

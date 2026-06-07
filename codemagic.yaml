@@ -10,10 +10,15 @@ workflows:
           if ! command -v xcodegen >/dev/null 2>&1; then
             brew install xcodegen
           fi
+          if ! command -v pod >/dev/null 2>&1; then
+            brew install cocoapods
+          fi
           rm -rf VoiceMate.xcodeproj
           xcodegen generate
+          pod repo add volcengine https://github.com/volcengine/volcengine-specs.git || pod repo update volcengine
+          pod install --repo-update
           xcodebuild -resolvePackageDependencies \
-            -project VoiceMate.xcodeproj \
+            -workspace VoiceMate.xcworkspace \
             -scheme VoiceMate \
             -clonedSourcePackagesDirPath "$CM_BUILD_DIR/SourcePackages"
       - name: Build
@@ -22,7 +27,7 @@ workflows:
           DERIVED_DATA="$CM_BUILD_DIR/DerivedData"
           rm -rf "$DERIVED_DATA"
           xcodebuild \
-            -project VoiceMate.xcodeproj \
+            -workspace VoiceMate.xcworkspace \
             -scheme VoiceMate \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \

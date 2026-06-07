@@ -1,0 +1,9 @@
+source 'https://github.com/CocoaPods/Specs.git'
+source 'https://github.com/volcengine/volcengine-specs.git'
+
+platform :ios, '16.0'
+use_frameworks!
+
+target 'VoiceMate' do
+  pod 'VolcEngineRTC/Core', '3.60.15.8550'
+end
