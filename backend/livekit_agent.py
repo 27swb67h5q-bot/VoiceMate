@@ -1168,6 +1168,19 @@ class VoiceMateAgent(Agent):
         )
 
         self._volcengine_stt = VolcengineSTT()
+        self._agent_vad = silero.VAD.load(
+            min_speech_duration=float(os.environ.get("VOICEMATE_SILERO_MIN_SPEECH_SECONDS", "0.12")),
+            min_silence_duration=float(os.environ.get("VOICEMATE_SILERO_MIN_SILENCE_SECONDS", "0.38")),
+            prefix_padding_duration=float(os.environ.get("VOICEMATE_SILERO_PREFIX_PADDING_SECONDS", "0.24")),
+            activation_threshold=float(os.environ.get("VOICEMATE_SILERO_ACTIVATION_THRESHOLD", "0.45")),
+        )
+        self._stt_vad = silero.VAD.load(
+            min_speech_duration=float(os.environ.get("VOICEMATE_SILERO_MIN_SPEECH_SECONDS", "0.12")),
+            min_silence_duration=float(os.environ.get("VOICEMATE_SILERO_MIN_SILENCE_SECONDS", "0.38")),
+            prefix_padding_duration=float(os.environ.get("VOICEMATE_SILERO_PREFIX_PADDING_SECONDS", "0.24")),
+            activation_threshold=float(os.environ.get("VOICEMATE_SILERO_ACTIVATION_THRESHOLD", "0.45")),
+        )
+        self._realtime_stt = stt.StreamAdapter(stt=self._volcengine_stt, vad=self._stt_vad)
         self._deepseek_llm = DeepSeekLLM()
         self._volc_tts = VolcengineLiveTTS()
         self._silent_tts = SilentLiveTTS()
@@ -1182,13 +1195,8 @@ class VoiceMateAgent(Agent):
 
         super().__init__(
             instructions=instructions,
-            stt=self._volcengine_stt,
-            vad=silero.VAD.load(
-                min_speech_duration=float(os.environ.get("VOICEMATE_SILERO_MIN_SPEECH_SECONDS", "0.12")),
-                min_silence_duration=float(os.environ.get("VOICEMATE_SILERO_MIN_SILENCE_SECONDS", "0.38")),
-                prefix_padding_duration=float(os.environ.get("VOICEMATE_SILERO_PREFIX_PADDING_SECONDS", "0.24")),
-                activation_threshold=float(os.environ.get("VOICEMATE_SILERO_ACTIVATION_THRESHOLD", "0.45")),
-            ),
+            stt=self._realtime_stt,
+            vad=self._agent_vad,
             llm=self._deepseek_llm,
             tts=self._active_tts,
             allow_interruptions=True,       # Barge-in
