@@ -50,6 +50,7 @@ DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 CHAT_MAX_TOKENS = int(os.environ.get("VOICEMATE_CHAT_MAX_TOKENS", "220"))
+REALTIME_LLM_MAX_TOKENS = int(os.environ.get("VOICEMATE_LLM_MAX_TOKENS", "48"))
 
 VOLCENGINE_TTS_DEFAULT_VOICE = "zh_female_qingxinnvsheng_mars_bigtts"
 DEFAULT_VOICE = os.environ.get("VOICEMATE_TTS_VOICE", VOLCENGINE_TTS_DEFAULT_VOICE)
@@ -351,7 +352,15 @@ class LLMClient:
     def __init__(self):
         self.api_key = DEEPSEEK_API_KEY
 
-    async def reply(self, text: str, conversation_id: str, persona: str) -> str:
+    async def reply(
+        self,
+        text: str,
+        conversation_id: str,
+        persona: str,
+        *,
+        mode: str = "chat",
+        max_tokens: Optional[int] = None,
+    ) -> str:
         history = history_store.load(conversation_id)
         if not self.api_key:
             return f"我听到了：{text}。现在后端还没配置大模型 Key，所以我先用本地回复陪你。"
@@ -365,13 +374,13 @@ class LLMClient:
                 conversation_id=conversation_id,
                 persona=persona,
                 history=history,
-                mode="chat",
+                mode=mode,
             )
             response = await client.chat.completions.create(
                 model=DEEPSEEK_MODEL,
                 messages=messages,
                 temperature=0.8,
-                max_tokens=CHAT_MAX_TOKENS,
+                max_tokens=max_tokens or (REALTIME_LLM_MAX_TOKENS if mode == "realtime" else CHAT_MAX_TOKENS),
             )
             content = response.choices[0].message.content or ""
             return clean_text(content) or "我在听，你继续说。"
@@ -863,7 +872,13 @@ async def volcengine_custom_llm(payload: dict[str, Any]):
     persona = payload.get("persona") or payload.get("Persona") or extra.get("persona") or DEFAULT_PERSONA
     analysis = companion_orchestrator.analyze(text)
     started = metrics_store.timer("volcengine_custom_llm")
-    reply = await llm.reply(text, conversation_id, str(persona))
+    reply = await llm.reply(
+        text,
+        conversation_id,
+        str(persona),
+        mode="realtime",
+        max_tokens=REALTIME_LLM_MAX_TOKENS,
+    )
     recorded = companion_orchestrator.record_turn(
         conversation_id=conversation_id,
         user_text=text,

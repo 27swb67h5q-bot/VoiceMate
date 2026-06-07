@@ -108,32 +108,17 @@ EMOTION_PROFILES: dict[str, dict[str, Any]] = {
     },
 }
 
-
 EMOTION_LEXICON: dict[str, tuple[str, ...]] = {
     "anxious": ("焦虑", "慌", "害怕", "担心", "心烦", "睡不着", "压力", "紧张", "喘不过气"),
-    "comforting": ("烦", "累", "崩", "难受", "不开心", "委屈", "想哭", "撑不住", "痛苦", "失落"),
+    "comforting": ("烦", "累", "崩", "崩溃", "难受", "不开心", "委屈", "想哭", "撑不住", "痛苦", "失落"),
     "lonely": ("孤独", "没人陪", "一个人", "空落落", "没人懂", "好冷清"),
     "angry": ("生气", "气死", "火大", "烦死", "讨厌", "不爽", "凭什么"),
-    "cheerful": ("开心", "哈哈", "好玩", "舒服", "喜欢", "太好了", "开心死", "爽"),
+    "cheerful": ("开心", "哈哈", "好玩", "舒服", "喜欢", "太好了", "高兴", "爽"),
     "affectionate": ("想你", "抱抱", "陪我", "喜欢你", "爱你", "贴贴", "亲亲"),
-    "focused": ("怎么办", "怎么做", "帮我", "修复", "方案", "检查", "优化", "构建", "报错"),
+    "focused": ("怎么办", "怎么弄", "怎么做", "帮我", "修复", "方案", "检查", "优化", "构建", "报错", "记一下"),
 }
 
-
-EMOTION_LEXICON.update(
-    {
-        "anxious": EMOTION_LEXICON.get("anxious", ()) + ("焦虑", "慌", "害怕", "担心", "心烦", "紧张", "压力", "睡不着", "喘不过气"),
-        "comforting": EMOTION_LEXICON.get("comforting", ()) + ("累", "崩溃", "难受", "不开心", "委屈", "想哭", "撑不住", "痛苦", "失落"),
-        "lonely": EMOTION_LEXICON.get("lonely", ()) + ("孤独", "没人陪", "一个人", "空落落", "没人懂", "好冷清"),
-        "angry": EMOTION_LEXICON.get("angry", ()) + ("生气", "气死", "火大", "烦死", "讨厌", "不爽", "凭什么"),
-        "cheerful": EMOTION_LEXICON.get("cheerful", ()) + ("开心", "哈哈", "好玩", "舒服", "喜欢", "太好了", "高兴"),
-        "affectionate": EMOTION_LEXICON.get("affectionate", ()) + ("想你", "抱抱", "陪我", "喜欢你", "爱你", "贴贴", "亲亲"),
-        "focused": EMOTION_LEXICON.get("focused", ()) + ("怎么弄", "怎么做", "帮我", "修复", "方案", "检查", "优化", "构建", "报错", "记一下"),
-    }
-)
-
 INTENSIFIERS = ("特别", "非常", "真的", "太", "快", "一直", "完全", "超级", "有点", "好")
-
 
 PERSONA_POLICIES: dict[str, dict[str, str]] = {
     "love": {
@@ -242,13 +227,7 @@ class CompanionMemoryStore:
                 ),
             )
 
-    def update_from_turn(
-        self,
-        conversation_id: str,
-        user_text: str,
-        assistant_text: str,
-        analysis: TurnAnalysis,
-    ) -> None:
+    def update_from_turn(self, conversation_id: str, user_text: str, assistant_text: str, analysis: TurnAnalysis) -> None:
         memory = self.load(conversation_id)
         memory["last_user_emotion"] = analysis.emotion
         memory["mood"] = analysis.emotion if analysis.intensity >= 2 else memory.get("mood", "neutral")
@@ -260,7 +239,7 @@ class CompanionMemoryStore:
         memory["facts"] = facts[-20:]
 
         preferences = dict(memory.get("preferences", {}))
-        if any(w in user_text for w in ("叫我", "称呼我")):
+        if any(word in user_text for word in ("叫我", "称呼我")):
             match = re.search(r"(?:叫我|称呼我)[：:\s]*([^，。,.!?！？\s]{1,12})", user_text)
             if match:
                 preferences["nickname"] = match.group(1)
@@ -277,13 +256,7 @@ class CompanionMemoryStore:
                 INSERT INTO conversation_turns(conversation_id, user_text, assistant_text, emotion, created_at)
                 VALUES (?, ?, ?, ?, ?)
                 """,
-                (
-                    conversation_id,
-                    user_text,
-                    assistant_text,
-                    analysis.emotion,
-                    datetime.now().isoformat(timespec="seconds"),
-                ),
+                (conversation_id, user_text, assistant_text, analysis.emotion, datetime.now().isoformat(timespec="seconds")),
             )
 
     def render(self, conversation_id: str) -> str:
@@ -366,27 +339,19 @@ class CompanionOrchestrator:
             score += 1
         return max(1, min(score, 4))
 
-    def system_prompt(
-        self,
-        persona: str,
-        conversation_id: str,
-        *,
-        mode: str,
-        user_text: str = "",
-    ) -> str:
+    def system_prompt(self, persona: str, conversation_id: str, *, mode: str, user_text: str = "") -> str:
         policy = PERSONA_POLICIES.get(persona, PERSONA_POLICIES["love"])
         analysis = self.analyze(user_text) if user_text else self.analyze("")
         memory = self.memory.render(conversation_id)
         rag_memory = self.rag.render(conversation_id, user_text, limit=5) if user_text else "暂无相关记忆。"
         memory = f"{memory}\n\n相关历史检索：\n{rag_memory}"
         mode_rule = (
-            "当前是实时语音通话：默认只回 1 句短口语，8 到 18 个中文字左右；不要开场寒暄，不要解释过程，不要连续追问。"
+            "当前是实时语音通话：默认只回 1 句短口语，8 到 18 个中文字符左右；不要开场寒暄，不要解释过程，不要连续追问。"
             if mode == "realtime"
             else "当前是文字聊天但会被朗读：文字自然，适合直接变成语音。"
         )
 
         return f"""你是 VoiceMate，一个个人伴侣型 AI，不是问答机器人。
-
 人格：{policy['name']}
 说话节奏：{policy['rhythm']}
 边界：{policy['boundary']}
@@ -399,8 +364,7 @@ class CompanionOrchestrator:
 - 情绪强度：{analysis.intensity}/4
 - 语音倾向：{analysis.tts_emotion}，语速系数 {analysis.tts_speed}
 
-长期记忆：
-{memory}
+长期记忆：{memory}
 
 行为规则：
 1. 先回应用户的状态，再回答事情本身。
@@ -410,35 +374,21 @@ class CompanionOrchestrator:
 5. 遇到用户低落时，先接住情绪，再给很小的一步。
 6. 遇到实时通话时，只给一句能接住用户的话；用户明确要方案时，也先用一句话确认方向。
 7. 情绪强度高时，不要急着讲道理；先给一句具体的共情，再给一个很小的动作。
-8. 用户开心或亲近时，可以轻快一点回应，但不要读出表情、括号动作或舞台提示。
-"""
+8. 用户开心或亲近时，可以轻快一点回应，但不要读出表情、括号动作或舞台提示。"""
 
-    def build_messages(
-        self,
-        *,
-        user_text: str,
-        conversation_id: str,
-        persona: str,
-        history: list[dict[str, str]],
-        mode: str,
-    ) -> list[dict[str, str]]:
+    def build_messages(self, *, user_text: str, conversation_id: str, persona: str, history: list[dict[str, str]], mode: str) -> list[dict[str, str]]:
         messages = [
             {
                 "role": "system",
                 "content": self.system_prompt(persona, conversation_id, mode=mode, user_text=user_text),
             }
         ]
-        messages.extend(history[-10:])
+        history_limit = 3 if mode == "realtime" else 10
+        messages.extend(history[-history_limit:])
         messages.append({"role": "user", "content": user_text})
         return messages
 
-    def record_turn(
-        self,
-        *,
-        conversation_id: str,
-        user_text: str,
-        assistant_text: str,
-    ) -> TurnAnalysis:
+    def record_turn(self, *, conversation_id: str, user_text: str, assistant_text: str) -> TurnAnalysis:
         analysis = self.analyze(user_text)
         self.memory.update_from_turn(conversation_id, user_text, assistant_text, analysis)
         self.rag.add_turn(conversation_id, user_text, assistant_text, analysis.emotion)
