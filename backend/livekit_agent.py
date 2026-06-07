@@ -856,7 +856,7 @@ class VolcengineLiveTTS(tts.TTS):
 
     def __init__(self):
         super().__init__(
-            capabilities=tts.TTSCapabilities(streaming=True),
+            capabilities=tts.TTSCapabilities(streaming=False),
             sample_rate=24000,
             num_channels=1,
         )
@@ -1285,15 +1285,18 @@ class VoiceMateAgent(Agent):
         )
         full_text: list[str] = []
         spoken_text = ""
+        muted_remainder = False
         llm_started = time.perf_counter()
         first_token_ms: Optional[float] = None
         async with stream:
             async for chunk in stream:
                 if chunk.delta and chunk.delta.content:
+                    if muted_remainder:
+                        continue
                     content, should_stop = _trim_realtime_delta(spoken_text, chunk.delta.content)
                     if not content:
                         if should_stop:
-                            break
+                            muted_remainder = True
                         continue
                     if first_token_ms is None:
                         first_token_ms = (time.perf_counter() - llm_started) * 1000
@@ -1309,9 +1312,10 @@ class VoiceMateAgent(Agent):
                     )
                     if should_stop:
                         logger.info("Realtime LLM clipped to one sentence chars=%d [%s]", len(spoken_text), self._conv_id)
-                        break
+                        muted_remainder = True
                 else:
-                    yield chunk
+                    if not muted_remainder:
+                        yield chunk
         reply = "".join(full_text).strip()
         if reply:
             full_response_ms = (time.perf_counter() - llm_started) * 1000
