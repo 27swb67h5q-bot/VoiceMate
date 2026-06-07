@@ -980,7 +980,7 @@ async def rtc_capabilities():
         "volcengine_rtc": {
             **volc_caps,
             "role": "active" if VOICEMATE_RTC_PROVIDER == "volcengine" else "prepared",
-            "note": "Switch VOICEMATE_RTC_PROVIDER=volcengine after AppId, token generation and iOS SDK integration are ready.",
+            "note": "Volcengine RTC is ready when configured=true and missing is empty.",
         },
     }
 

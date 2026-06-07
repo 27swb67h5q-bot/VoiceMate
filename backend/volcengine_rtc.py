@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import datetime as dt
 import hashlib
 import hmac
@@ -12,6 +11,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 import aiohttp
+from volcengine_rtc_token import generate_rtc_token
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -335,27 +335,15 @@ class VolcengineRTCService:
                     return str(token)
 
         if self.config.app_key:
-            return self._local_rtc_token(room_id=room_id, user_id=user_id)
+            return generate_rtc_token(
+                app_id=self.config.app_id,
+                app_key=self.config.app_key,
+                room_id=room_id,
+                user_id=user_id,
+                ttl_seconds=int(os.environ.get("VOLCENGINE_RTC_TOKEN_TTL_SECONDS", "86400")),
+            )
 
         raise RuntimeError("VOLCENGINE_RTC_TOKEN_URL or VOLCENGINE_RTC_APP_KEY is required")
-
-    def _local_rtc_token(self, *, room_id: str, user_id: str) -> str:
-        expires = int(dt.datetime.now(dt.timezone.utc).timestamp()) + int(
-            os.environ.get("VOLCENGINE_RTC_TOKEN_TTL_SECONDS", "3600")
-        )
-        payload = {
-            "app_id": self.config.app_id,
-            "room_id": room_id,
-            "user_id": user_id,
-            "exp": expires,
-        }
-        # Some Volcengine accounts require an official token generator. This
-        # local token is deliberately marked so the app/backend can surface the
-        # need for replacement if the SDK rejects it.
-        body = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8")).rstrip(b"=")
-        signature = hmac.new(self.config.app_key.encode("utf-8"), body, hashlib.sha256).digest()
-        sig = base64.urlsafe_b64encode(signature).rstrip(b"=")
-        return f"vm-local.{body.decode('ascii')}.{sig.decode('ascii')}"
 
     def capabilities(self) -> dict[str, Any]:
         return {
@@ -363,6 +351,7 @@ class VolcengineRTCService:
             "app_id_present": bool(self.config.app_id),
             "app_key_present": bool(self.config.app_key),
             "token_url_present": bool(self.config.token_url),
+            "token_provider": "external_url" if self.config.token_url else "official_app_key",
             "openapi_configured": self.config.can_call_openapi,
             "start_voice_chat_enabled": self.config.start_voice_chat,
             "custom_llm_url": self.config.custom_llm_url,
