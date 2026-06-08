@@ -1,5 +1,8 @@
 backend/venv/
 __pycache__/
 *.pyc
+*.log
 .env
 audio_cache/
+history/
+memory/

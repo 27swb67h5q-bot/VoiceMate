@@ -1,45 +1,28 @@
 import Foundation
 
-/// Represents a single chat message in the conversation
-struct ChatMessage: Identifiable, Codable {
-    let id: UUID
-    let isUser: Bool
+struct ChatMessage: Identifiable, Codable, Equatable {
+    var id: UUID = UUID()
+    var role: Role
     var text: String
     var audioURL: String?
-    let timestamp: Date
+    var timestamp: Date = Date()
     var isPlaying: Bool = false
-    var duration: TimeInterval = 0
-    
-    enum CodingKeys: String, CodingKey {
-        case id, isUser, text, audioURL, timestamp, duration
+
+    enum Role: String, Codable {
+        case user
+        case assistant
     }
+
+    var isUser: Bool { role == .user }
 }
 
-/// Response from the backend chat API
-struct ChatResponse: Codable {
-    let replyText: String
-    let audioUrl: String
-    let conversationId: String
-    let durationMs: Int
-    let emotion: String?
-    
-    enum CodingKeys: String, CodingKey {
-        case replyText = "reply_text"
-        case audioUrl = "audio_url"
-        case conversationId = "conversation_id"
-        case durationMs = "duration_ms"
-        case emotion
-    }
-}
-
-/// Request body for the chat API
 struct ChatRequest: Codable {
     let text: String
     let conversationId: String?
-    let voice: String?  // TTS voice name
-    let persona: String?  // AI personality
-    let speed: Double?  // TTS speed ratio (0.5-2.0, 1.0 = normal)
-    
+    let voice: String?
+    let persona: String?
+    let speed: Double?
+
     enum CodingKeys: String, CodingKey {
         case text
         case conversationId = "conversation_id"
@@ -49,14 +32,33 @@ struct ChatRequest: Codable {
     }
 }
 
-// MARK: - Voice Clone API Models
+struct ChatResponse: Codable {
+    let replyText: String
+    let audioUrl: String
+    let conversationId: String
+    let durationMs: Int
+    let emotion: String?
+    let emotionLabel: String?
+    let emotionIntensity: Int?
+    let need: String?
 
-/// Response from the voice clone upload endpoint
+    enum CodingKeys: String, CodingKey {
+        case replyText = "reply_text"
+        case audioUrl = "audio_url"
+        case conversationId = "conversation_id"
+        case durationMs = "duration_ms"
+        case emotion
+        case emotionLabel = "emotion_label"
+        case emotionIntensity = "emotion_intensity"
+        case need
+    }
+}
+
 struct CloneVoiceResponse: Codable {
     let voiceId: String
     let status: String
     let message: String?
-    
+
     enum CodingKeys: String, CodingKey {
         case voiceId = "voice_id"
         case status
@@ -64,13 +66,12 @@ struct CloneVoiceResponse: Codable {
     }
 }
 
-/// Response from the clone status endpoint
 struct CloneStatusResponse: Codable {
     let voiceId: String
     let status: String
     let name: String?
     let createdAt: String?
-    
+
     enum CodingKeys: String, CodingKey {
         case voiceId = "voice_id"
         case status
@@ -79,15 +80,14 @@ struct CloneStatusResponse: Codable {
     }
 }
 
-/// Individual cloned voice info
-struct CloneVoiceInfo: Codable, Identifiable {
+struct CloneVoiceInfo: Codable, Identifiable, Equatable {
     let voiceId: String
     let name: String?
     let status: String
     let createdAt: String?
-    
+
     var id: String { voiceId }
-    
+
     enum CodingKeys: String, CodingKey {
         case voiceId = "voice_id"
         case name
@@ -96,7 +96,40 @@ struct CloneVoiceInfo: Codable, Identifiable {
     }
 }
 
-/// Wrapper for the list endpoint
 struct CloneVoiceListResponse: Codable {
     let voices: [CloneVoiceInfo]
+}
+
+struct LiveKitTokenResponse: Codable {
+    let token: String
+    let room: String
+    let url: String?
+}
+
+struct RTCSessionResponse: Codable {
+    let provider: String
+    let token: String
+    let room: String?
+    let url: String?
+    let appId: String?
+    let roomId: String?
+    let userId: String?
+    let taskId: String?
+    let businessId: String?
+    let configured: Bool?
+    let needs: [String]?
+
+    enum CodingKeys: String, CodingKey {
+        case provider
+        case token
+        case room
+        case url
+        case appId = "app_id"
+        case roomId = "room_id"
+        case userId = "user_id"
+        case taskId = "task_id"
+        case businessId = "business_id"
+        case configured
+        case needs
+    }
 }

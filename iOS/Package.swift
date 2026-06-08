@@ -7,7 +7,7 @@ let package = Package(
         .iOS(.v16)
     ],
     dependencies: [
-        .package(url: "https://github.com/livekit/client-sdk-swift.git", from: "2.0.0"),
+        .package(url: "https://github.com/livekit/client-sdk-swift.git", exact: "2.14.1"),
     ],
     targets: [
         .executableTarget(

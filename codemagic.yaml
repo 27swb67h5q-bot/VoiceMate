@@ -4,22 +4,45 @@ workflows:
     environment:
       xcode: latest
     scripts:
+      - name: Install tools and generate Xcode project
+        script: |
+          cd iOS
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          if ! command -v pod >/dev/null 2>&1; then
+            brew install cocoapods
+          fi
+          rm -rf VoiceMate.xcodeproj
+          xcodegen generate
+          pod repo add volcengine https://github.com/volcengine/volcengine-specs.git || pod repo update volcengine
+          pod install --repo-update
+          xcodebuild -resolvePackageDependencies \
+            -workspace VoiceMate.xcworkspace \
+            -scheme VoiceMate \
+            -clonedSourcePackagesDirPath "$CM_BUILD_DIR/SourcePackages"
       - name: Build
         script: |
           cd iOS
+          DERIVED_DATA="$CM_BUILD_DIR/DerivedData"
+          rm -rf "$DERIVED_DATA"
           xcodebuild \
-            -project VoiceMate.xcodeproj \
+            -workspace VoiceMate.xcworkspace \
             -scheme VoiceMate \
             -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
             -configuration Release \
+            -derivedDataPath "$DERIVED_DATA" \
+            -clonedSourcePackagesDirPath "$CM_BUILD_DIR/SourcePackages" \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             build
-      - name: Package IPA for TrollStore
+      - name: Package IPA
         script: |
           # Find .app bundle
-          APP_PATH=$(find "$HOME/Library/Developer/Xcode/DerivedData" -name "VoiceMate.app" -path "*/Release-iphoneos/*" -type d | head -1)
+          DERIVED_DATA="$CM_BUILD_DIR/DerivedData"
+          APP_PATH=$(find "$DERIVED_DATA" -name "VoiceMate.app" -path "*/Release-iphoneos/*" -type d | head -1)
           echo "App path: $APP_PATH"
 
           if [ ! -d "$APP_PATH" ]; then
@@ -31,7 +54,7 @@ workflows:
           mkdir -p "$APP_PATH/Frameworks"
 
           # Find PackageFrameworks (where SPM puts dynamic frameworks)
-          PKG_FW_DIR=$(find "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "PackageFrameworks" -path "*/Release-iphoneos/*" 2>/dev/null | head -1)
+          PKG_FW_DIR=$(find "$DERIVED_DATA" -type d -name "PackageFrameworks" -path "*/Release-iphoneos/*" 2>/dev/null | head -1)
           echo "PackageFrameworks dir: $PKG_FW_DIR"
 
           if [ -n "$PKG_FW_DIR" ]; then
@@ -48,21 +71,79 @@ workflows:
             echo "==> Searching for WebRTC.framework anywhere in DerivedData..."
           fi
 
+          echo "==> Copying dynamic frameworks from build products..."
+          PRODUCT_DIR=$(dirname "$APP_PATH")
+          find "$PRODUCT_DIR" "$DERIVED_DATA/Build/Products/Release-iphoneos" -name "*.framework" -type d 2>/dev/null | while read -r fw; do
+            [ -d "$fw" ] || continue
+            case "$fw" in
+              "$APP_PATH/Frameworks/"*) continue ;;
+              "$APP_PATH"*) continue ;;
+            esac
+            fw_name=$(basename "$fw")
+            echo "  Embedding product framework: $fw_name"
+            rm -rf "$APP_PATH/Frameworks/$fw_name"
+            cp -Rf "$fw" "$APP_PATH/Frameworks/"
+          done
+
+          echo "==> Copying dynamic libraries from build products..."
+          find "$PRODUCT_DIR" "$DERIVED_DATA/Build/Products/Release-iphoneos" -name "*.dylib" -type f 2>/dev/null | while read -r dylib; do
+            [ -f "$dylib" ] || continue
+            case "$dylib" in
+              "$APP_PATH/Frameworks/"*) continue ;;
+              "$APP_PATH"*) continue ;;
+            esac
+            dylib_name=$(basename "$dylib")
+            echo "  Embedding product dylib: $dylib_name"
+            rm -f "$APP_PATH/Frameworks/$dylib_name"
+            cp -f "$dylib" "$APP_PATH/Frameworks/"
+          done
+
           # Ensure WebRTC.framework is present (fallback if PackageFrameworks path differs)
           if [ ! -d "$APP_PATH/Frameworks/WebRTC.framework" ]; then
-            WEBRTC=$(find "$HOME/Library/Developer/Xcode/DerivedData" -name "WebRTC.framework" -type d 2>/dev/null | head -1)
+            WEBRTC=$(find "$DERIVED_DATA" "$CM_BUILD_DIR/SourcePackages" -name "WebRTC.framework" -type d 2>/dev/null | head -1)
             if [ -n "$WEBRTC" ]; then
               echo "  Embedding WebRTC.framework (fallback) from: $WEBRTC"
               cp -Rf "$WEBRTC" "$APP_PATH/Frameworks/"
             else
-              echo "ERROR: WebRTC.framework not found anywhere in DerivedData"
-              echo "LiveKit dependency may have failed to resolve or WebRTC is statically linked."
-              exit 1
+              echo "WARNING: WebRTC.framework not found; continuing because the selected LiveKit SDK may link it statically."
             fi
           fi
 
           echo "==> Frameworks in .app bundle:"
           ls -la "$APP_PATH/Frameworks/" 2>/dev/null || echo "  (empty)"
+
+          echo "==> Linked libraries:"
+          otool -L "$APP_PATH/VoiceMate" || true
+
+          echo "==> Verifying @rpath framework dependencies are embedded..."
+          MISSING_DEPS="/tmp/voicemate-missing-frameworks.txt"
+          rm -f "$MISSING_DEPS"
+          find "$APP_PATH" -type f 2>/dev/null | while read -r bin; do
+            if ! file "$bin" | grep -q "Mach-O"; then
+              continue
+            fi
+            otool -L "$bin" | awk '/@rpath\\/.*\\.framework/ {print $1}' | while read -r dep; do
+              fw_name=$(echo "$dep" | sed -E 's#@rpath/([^/]+\\.framework)/.*#\\1#')
+              if [ ! -d "$APP_PATH/Frameworks/$fw_name" ]; then
+                echo "ERROR: Missing embedded framework required by $(basename "$bin"): $fw_name"
+                echo "$fw_name" >> "$MISSING_DEPS"
+              fi
+            done
+          done
+          if [ -s "$MISSING_DEPS" ]; then
+            exit 1
+          fi
+
+          echo "==> Ad-hoc signing embedded code for TrollStore launch compatibility..."
+          find "$APP_PATH/Frameworks" -type f 2>/dev/null | while read -r bin; do
+            if file "$bin" | grep -q "Mach-O"; then
+              codesign --force --sign - --timestamp=none "$bin" || true
+            fi
+          done
+          find "$APP_PATH/Frameworks" -name "*.framework" -type d 2>/dev/null | while read -r fw; do
+            codesign --force --sign - --timestamp=none "$fw" || true
+          done
+          codesign --force --sign - --timestamp=none "$APP_PATH" || true
 
           # Package into IPA
           echo "==> Packaging IPA..."
@@ -72,7 +153,19 @@ workflows:
           cp -Rf "$APP_PATH" Payload/
           IPA_PATH="${CM_BUILD_DIR:-$HOME/clone}/VoiceMate.ipa"
           rm -f "$IPA_PATH"
-          cd Payload && zip -r "$IPA_PATH" . -q
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent Payload "$IPA_PATH"
+
+          echo "==> IPA contents:"
+          unzip -Z1 "$IPA_PATH" | head -80
+          if ! unzip -Z1 "$IPA_PATH" | grep -q '^Payload/VoiceMate.app/Info.plist$'; then
+            echo "ERROR: IPA is malformed. TrollStore requires Payload/VoiceMate.app/Info.plist at archive root."
+            exit 1
+          fi
+          if ! unzip -Z1 "$IPA_PATH" | grep -q '^Payload/VoiceMate.app/VoiceMate$'; then
+            echo "ERROR: IPA is malformed. Missing app executable at Payload/VoiceMate.app/VoiceMate."
+            exit 1
+          fi
+
           cd /tmp && rm -rf Payload
           echo "IPA ready at: $IPA_PATH"
     artifacts:
