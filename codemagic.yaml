@@ -118,12 +118,17 @@ workflows:
           echo "==> Verifying @rpath framework dependencies are embedded..."
           MISSING_DEPS="/tmp/voicemate-missing-frameworks.txt"
           rm -f "$MISSING_DEPS"
-          otool -L "$APP_PATH/VoiceMate" | awk '/@rpath\\/.*\\.framework/ {print $1}' | while read -r dep; do
-            fw_name=$(echo "$dep" | sed -E 's#@rpath/([^/]+\\.framework)/.*#\\1#')
-            if [ ! -d "$APP_PATH/Frameworks/$fw_name" ]; then
-              echo "ERROR: Missing embedded framework required by executable: $fw_name"
-              echo "$fw_name" >> "$MISSING_DEPS"
+          find "$APP_PATH" -type f 2>/dev/null | while read -r bin; do
+            if ! file "$bin" | grep -q "Mach-O"; then
+              continue
             fi
+            otool -L "$bin" | awk '/@rpath\\/.*\\.framework/ {print $1}' | while read -r dep; do
+              fw_name=$(echo "$dep" | sed -E 's#@rpath/([^/]+\\.framework)/.*#\\1#')
+              if [ ! -d "$APP_PATH/Frameworks/$fw_name" ]; then
+                echo "ERROR: Missing embedded framework required by $(basename "$bin"): $fw_name"
+                echo "$fw_name" >> "$MISSING_DEPS"
+              fi
+            done
           done
           if [ -s "$MISSING_DEPS" ]; then
             exit 1

@@ -5,5 +5,5 @@ platform :ios, '16.0'
 use_frameworks!
 
 target 'VoiceMate' do
-  pod 'VolcEngineRTC/Core', '3.60.15.8550'
+  pod 'VolcEngineRTC', '3.60.15.8550', :subspecs => ['Core', 'RealXBase', 'RTCFFmpeg']
 end
