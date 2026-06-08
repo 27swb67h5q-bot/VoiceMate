@@ -133,7 +133,7 @@ final class VolcengineRTCCallService: NSObject, ObservableObject {
         try session.setCategory(
             .playAndRecord,
             mode: .voiceChat,
-            options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP]
+            options: [.defaultToSpeaker, .allowBluetoothHFP, .allowBluetoothA2DP]
         )
         try session.setPreferredSampleRate(48_000)
         try session.setPreferredIOBufferDuration(0.005)
@@ -233,12 +233,12 @@ extension VolcengineRTCCallService {
 
     private func stopVolcengineCall() async {
         room?.publishStreamAudio(false)
-        room?.leaveRoom()
+        room?.leave()
         room?.destroy()
         room = nil
         engine?.stopAudioCapture()
         if let engine {
-            ByteRTCEngine.destroyRTCEngineMulti(engine)
+            ByteRTCEngine.destroyMulti(engine)
         }
         engine = nil
         activeSession = nil
