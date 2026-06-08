@@ -342,6 +342,14 @@ class CompanionOrchestrator:
     def system_prompt(self, persona: str, conversation_id: str, *, mode: str, user_text: str = "") -> str:
         policy = PERSONA_POLICIES.get(persona, PERSONA_POLICIES["love"])
         analysis = self.analyze(user_text) if user_text else self.analyze("")
+        if mode == "realtime":
+            return (
+                "你是 VoiceMate 的实时语音伴侣。"
+                f"人格：{policy['name']}。"
+                f"用户情绪：{analysis.emotion}，需求：{analysis.need}。"
+                "只回复一句自然中文口语，6到18个字；不要寒暄开场；不要表情、括号动作、舞台提示；"
+                "先接住情绪，再轻轻回应。"
+            )
         memory = self.memory.render(conversation_id)
         rag_memory = self.rag.render(conversation_id, user_text, limit=5) if user_text else "暂无相关记忆。"
         memory = f"{memory}\n\n相关历史检索：\n{rag_memory}"
@@ -383,6 +391,11 @@ class CompanionOrchestrator:
                 "content": self.system_prompt(persona, conversation_id, mode=mode, user_text=user_text),
             }
         ]
+        if mode == "realtime":
+            if history:
+                messages.extend(history[-1:])
+            messages.append({"role": "user", "content": user_text})
+            return messages
         history_limit = 3 if mode == "realtime" else 10
         messages.extend(history[-history_limit:])
         messages.append({"role": "user", "content": user_text})

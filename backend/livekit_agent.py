@@ -2,16 +2,17 @@
 """
 VoiceMate LiveKit Agent
 
-Connects to a local LiveKit server, receives user voice in real-time,
-processes with DeepSeek LLM, and responds with Volcengine voice synthesis.
+Connects to a local LiveKit server, receives user voice in real time,
+processes it through the unified realtime VoiceMate LLM path, and responds
+with Volcengine voice synthesis.
 
 Architecture:
-  User mic → LiveKit Room → (VAD) → Volcengine streaming ASR → DeepSeek LLM → Volcengine TTS → LiveKit Room → User speaker
+  User mic → LiveKit Room → (VAD) → Volcengine streaming ASR → Ark/instant emotion LLM → Volcengine TTS → LiveKit Room → User speaker
 
 Supports:
   - Real-time voice via LiveKit Agent pipeline
   - Built-in VAD + endpointing
-  - DeepSeek LLM for response generation
+  - Volcengine Ark LLM with explicit timeout metrics
   - Volcengine TTS for voice synthesis (reuses server.py approach)
   - Barge-in (user interruption during AI speech)
   - Persona system prompts from existing VoiceMate project
@@ -24,7 +25,7 @@ Usage:
   #   export LIVEKIT_URL=ws://localhost:7880
   #   export LIVEKIT_API_KEY=your_api_key
   #   export LIVEKIT_API_SECRET=your_api_secret
-  #   export DEEPSEEK_API_KEY=sk-...
+  #   export VOLCENGINE_ARK_API_KEY=ark-...
 
   # Run:
   #   python livekit_agent.py
@@ -71,6 +72,7 @@ from server import (
     DEEPSEEK_API_KEY,
     DEEPSEEK_BASE_URL,
     DEEPSEEK_MODEL,
+    VOLCENGINE_ARK_MODEL,
     TTS_VOICE,
     PERSONAS,
     DEFAULT_PERSONA,
@@ -85,6 +87,7 @@ from server import (
     VolcengineTTSClient,
     companion_orchestrator,
     history_store,
+    llm as backend_llm,
     metrics_store,
     logger as voicemate_logger,
 )
@@ -786,10 +789,6 @@ class DeepSeekLLMStream(llm.LLMStream):
                 break
         if is_semantically_incomplete(last_user_text):
             logger.info("Semantic turn gate: waiting for continuation: %s", last_user_text[:80])
-            self._event_ch.send_nowait(llm.ChatChunk(
-                id=str(uuid.uuid4()),
-                delta=llm.ChoiceDelta(role="assistant", content="嗯，你继续说，我听着。"),
-            ))
             return
 
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M %A")
@@ -864,12 +863,7 @@ def _trim_realtime_delta(current_text: str, delta_text: str) -> tuple[str, bool]
 class VolcengineLiveTTS(tts.TTS):
     """LiveKit TTS adapter for Volcengine V3 bidirectional TTS."""
 
-    ACK_TEXTS = {
-        "gentle": "嗯，我在。",
-        "happy": "嘿，我听着。",
-        "sad": "我在，慢慢说。",
-        "angry": "我听见了，先别急。",
-    }
+    ACK_TEXTS: dict[str, str] = {}
 
     def __init__(self):
         super().__init__(
@@ -1273,6 +1267,15 @@ class VoiceMateAgent(Agent):
                 intensity=self._last_analysis.intensity,
                 need=self._last_analysis.need,
             )
+            await self._publish_call_event(
+                "mood_card",
+                title=self._last_analysis.status_label,
+                emotion=self._last_analysis.emotion,
+                need=self._last_analysis.need,
+                intensity=self._last_analysis.intensity,
+                tts_emotion=self._last_analysis.tts_emotion,
+                hint=self._mood_hint(self._last_analysis.emotion),
+            )
             if audio_emotion:
                 await self._publish_call_event(
                     "audio_emotion",
@@ -1288,68 +1291,73 @@ class VoiceMateAgent(Agent):
                 await self._publish_call_event("metrics", label="ASR", value_ms=self._volcengine_stt.last_asr_latency_ms)
             await self._publish_call_event("call_state", state="thinking")
 
+    @staticmethod
+    def _mood_hint(emotion: str) -> str:
+        hints = {
+            "anxious": "先稳住呼吸，再慢慢讲给我听。",
+            "comforting": "今天可以不用硬撑。",
+            "lonely": "我会多陪你停一会儿。",
+            "angry": "这股火气我先接住。",
+            "cheerful": "我想多听你讲讲这份开心。",
+            "affectionate": "我会温柔一点回应你。",
+            "focused": "我陪你把问题拆小。",
+            "curious": "我先抓重点回答你。",
+        }
+        return hints.get(emotion, "我在认真听你说。")
+
     async def llm_node(
         self,
         chat_ctx: llm.ChatContext,
         tools: list[llm.Tool],
         model_settings,
     ) -> AsyncGenerator[llm.ChatChunk, None]:
-        if self._last_user_text:
-            try:
-                system_text = companion_orchestrator.system_prompt(
-                    self._persona,
-                    self._conv_id,
-                    mode="realtime",
-                    user_text=self._last_user_text,
-                )
-                chat_ctx.add_message(role="system", content=system_text)
-            except Exception as e:
-                logger.warning("Failed to inject orchestrator prompt: %s", e)
+        del chat_ctx, tools, model_settings
+        if not self._last_user_text:
+            return
 
-        tool_choice = getattr(model_settings, "tool_choice", None)
-        stream = self._deepseek_llm.chat(
-            chat_ctx=chat_ctx,
-            tools=tools,
-            tool_choice=tool_choice,
-        )
-        full_text: list[str] = []
-        spoken_text = ""
-        muted_remainder = False
+        if is_semantically_incomplete(self._last_user_text):
+            await self._publish_call_event("call_state", state="listening")
+            return
+
         llm_started = time.perf_counter()
-        first_token_ms: Optional[float] = None
-        async with stream:
-            async for chunk in stream:
-                if chunk.delta and chunk.delta.content:
-                    if muted_remainder:
-                        continue
-                    content, should_stop = _trim_realtime_delta(spoken_text, chunk.delta.content)
-                    if not content:
-                        if should_stop:
-                            muted_remainder = True
-                        continue
-                    if first_token_ms is None:
-                        first_token_ms = (time.perf_counter() - llm_started) * 1000
-                        logger.info("LLM first token latency=%.0fms [%s]", first_token_ms, self._conv_id)
-                        metrics_store.record("realtime_llm_first_token", first_token_ms)
-                        await self._publish_call_event("metrics", label="LLM", value_ms=first_token_ms)
-                        await self._publish_call_event("call_state", state="speaking")
-                    spoken_text += content
-                    full_text.append(content)
-                    yield llm.ChatChunk(
-                        id=chunk.id or str(uuid.uuid4()),
-                        delta=llm.ChoiceDelta(role="assistant", content=content),
-                    )
-                    if should_stop:
-                        logger.info("Realtime LLM clipped to one sentence chars=%d [%s]", len(spoken_text), self._conv_id)
-                        muted_remainder = True
-                else:
-                    if not muted_remainder:
-                        yield chunk
-        reply = "".join(full_text).strip()
+        result = await backend_llm.reply_result(
+            self._last_user_text,
+            self._conv_id,
+            self._persona,
+            mode="realtime",
+            max_tokens=LLM_MAX_TOKENS,
+        )
+        reply = strip_markdown(result.text).strip()
+        reply, _ = _trim_realtime_delta("", reply)
+        if not reply:
+            logger.warning("Realtime LLM produced no reply provider=%s error=%s [%s]", result.provider, result.error, self._conv_id)
+            await self._publish_call_event("metrics", label=f"LLM/{result.provider}", value_ms=(time.perf_counter() - llm_started) * 1000)
+            await self._publish_call_event("call_state", state="listening")
+            return
+        first_token_ms = (time.perf_counter() - llm_started) * 1000
+        logger.info(
+            "Realtime LLM reply latency=%.0fms provider=%s fallback=%s chars=%d [%s]",
+            first_token_ms,
+            result.provider,
+            result.fallback_used,
+            len(reply),
+            self._conv_id,
+        )
+        metrics_store.record(
+            "realtime_llm_first_token",
+            first_token_ms,
+            {"provider": result.provider, "fallback": "1" if result.fallback_used else "0"},
+        )
+        await self._publish_call_event("metrics", label=f"LLM/{result.provider}", value_ms=first_token_ms)
+        await self._publish_call_event("call_state", state="speaking")
+        yield llm.ChatChunk(
+            id=str(uuid.uuid4()),
+            delta=llm.ChoiceDelta(role="assistant", content=reply),
+        )
         if reply:
             full_response_ms = (time.perf_counter() - llm_started) * 1000
             logger.info("LLM full response latency=%.0fms chars=%d [%s]", full_response_ms, len(reply), self._conv_id)
-            metrics_store.record("realtime_llm_full", full_response_ms)
+            metrics_store.record("realtime_llm_full", full_response_ms, {"provider": result.provider})
             await self._publish_call_event("call_state", state="listening")
             if self._last_user_text:
                 history_store.append(self._conv_id, self._last_user_text, reply)
@@ -1409,18 +1417,15 @@ async def entrypoint(ctx: JobContext):
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    if not DEEPSEEK_API_KEY:
-        logger.warning(
-            "DEEPSEEK_API_KEY not set. The LiveKit agent can start, "
-            "but LLM calls will use a local error reply until a key is configured."
-        )
+    if not os.environ.get("VOLCENGINE_ARK_API_KEY"):
+        logger.warning("VOLCENGINE_ARK_API_KEY not set. LiveKit fallback realtime LLM will not be available.")
 
     if not LIVEKIT_URL or not LIVEKIT_API_KEY or not LIVEKIT_API_SECRET:
         logger.warning("LiveKit credentials not fully configured.")
 
     logger.info("Starting VoiceMate LiveKit Agent")
     logger.info(f"  LiveKit: {LIVEKIT_URL}")
-    logger.info(f"  DeepSeek: {DEEPSEEK_MODEL}")
+    logger.info("  Realtime LLM: Volcengine Ark / %s", VOLCENGINE_ARK_MODEL)
     logger.info("  Chat TTS provider: volcengine")
     logger.info("  Realtime TTS provider: %s", REALTIME_TTS_PROVIDER)
     logger.info("  Volcengine voice: %s", os.environ.get("VOLCENGINE_TTS_VOICE_TYPE", "not configured"))

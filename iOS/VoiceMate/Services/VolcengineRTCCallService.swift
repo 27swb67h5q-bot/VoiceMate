@@ -18,6 +18,7 @@ final class VolcengineRTCCallService: NSObject, ObservableObject {
     @Published var metricsText: String?
     @Published var emotionText: String?
     @Published var audioEmotionText: String?
+    @Published var moodHintText: String?
 
     private let serverHost: String
     private let serverPort: String
@@ -122,6 +123,7 @@ final class VolcengineRTCCallService: NSObject, ObservableObject {
                 self.metricsText = service.metricsText
                 self.emotionText = service.emotionText
                 self.audioEmotionText = service.audioEmotionText
+                self.moodHintText = service.moodHintText
             }
         }
     }

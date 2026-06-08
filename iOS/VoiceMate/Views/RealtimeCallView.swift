@@ -67,6 +67,14 @@ struct RealtimeCallView: View {
                         .font(.caption2)
                         .foregroundStyle(.white.opacity(0.48))
                 }
+                if let moodHint = service.moodHintText {
+                    Text(moodHint)
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.62))
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                        .padding(.horizontal, 28)
+                }
             }
 
             if let error = service.errorMessage {

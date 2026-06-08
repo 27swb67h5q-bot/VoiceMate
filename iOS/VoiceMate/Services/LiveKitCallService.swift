@@ -14,6 +14,7 @@ final class LiveKitCallService: NSObject, ObservableObject {
     @Published var metricsText: String?
     @Published var emotionText: String?
     @Published var audioEmotionText: String?
+    @Published var moodHintText: String?
 
     private let serverHost: String
     private let serverPort: String
@@ -175,6 +176,13 @@ final class LiveKitCallService: NSObject, ObservableObject {
                     self.emotionText = label
                     self.statusText = label
                 }
+            case "mood_card":
+                let title = object["title"] as? String
+                let hint = object["hint"] as? String
+                self.moodHintText = [title, hint]
+                    .compactMap { $0 }
+                    .filter { !$0.isEmpty }
+                    .joined(separator: " · ")
             case "audio_emotion":
                 if let emotion = object["emotion"] as? String,
                    let confidence = object["confidence"] as? Double {

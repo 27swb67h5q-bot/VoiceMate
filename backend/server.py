@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -51,6 +52,21 @@ DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.co
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 CHAT_MAX_TOKENS = int(os.environ.get("VOICEMATE_CHAT_MAX_TOKENS", "220"))
 REALTIME_LLM_MAX_TOKENS = int(os.environ.get("VOICEMATE_LLM_MAX_TOKENS", "48"))
+REALTIME_LLM_TIMEOUT_SECONDS = float(os.environ.get("VOICEMATE_REALTIME_LLM_TIMEOUT_SECONDS", "3.5"))
+VOLCENGINE_ARK_API_KEY = os.environ.get(
+    "VOLCENGINE_ARK_API_KEY",
+    os.environ.get("ARK_API_KEY", os.environ.get("DOUBAO_API_KEY", "")),
+)
+VOLCENGINE_ARK_BASE_URL = os.environ.get("VOLCENGINE_ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")
+VOLCENGINE_ARK_MODEL = os.environ.get(
+    "VOLCENGINE_ARK_MODEL",
+    os.environ.get("DOUBAO_MODEL", "doubao-seed-1-6-flash-250615"),
+)
+VOLCENGINE_ARK_REALTIME_FALLBACK = os.environ.get("VOLCENGINE_ARK_REALTIME_FALLBACK", "0").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 
 VOLCENGINE_TTS_DEFAULT_VOICE = "zh_female_qingxinnvsheng_mars_bigtts"
 DEFAULT_VOICE = os.environ.get("VOICEMATE_TTS_VOICE", VOLCENGINE_TTS_DEFAULT_VOICE)
@@ -115,7 +131,7 @@ PERSONAS: dict[str, str] = {
 }
 
 PROACTIVE: dict[str, list[str]] = {
-    "love": ["我在，慢慢说就好。", "今天有什么想跟我讲的吗？"],
+    "love": ["今天有什么想跟我讲的吗？", "刚刚想到你，想听听你现在怎么样。"],
     "friend": ["我来了，最近怎么样？", "有事就说，我听着。"],
     "assistant": ["已就绪。你可以直接告诉我任务。"],
     "mentor": ["我们可以先把问题拆小一点。"],
@@ -274,6 +290,14 @@ class ConversationStore:
         )
 
 
+@dataclass(frozen=True)
+class LLMReply:
+    text: str
+    provider: str
+    fallback_used: bool = False
+    error: Optional[str] = None
+
+
 history_store = ConversationStore(HISTORY_DIR)
 companion_orchestrator = CompanionOrchestrator(MEMORY_DIR)
 metrics_store = MetricsStore(MEMORY_DIR)
@@ -350,7 +374,24 @@ def audio_url(path: Path) -> str:
 
 class LLMClient:
     def __init__(self):
-        self.api_key = DEEPSEEK_API_KEY
+        self.deepseek_api_key = DEEPSEEK_API_KEY
+        self.ark_api_key = VOLCENGINE_ARK_API_KEY
+
+    def realtime_provider(self) -> str:
+        return "volcengine_ark" if self.ark_api_key else "deepseek_fallback"
+
+    def capabilities(self) -> dict[str, Any]:
+        return {
+            "chat_provider": "deepseek" if self.deepseek_api_key else "local_fallback",
+            "realtime_provider": self.realtime_provider(),
+            "deepseek_configured": bool(self.deepseek_api_key),
+            "ark_configured": bool(self.ark_api_key),
+            "ark_base_url": VOLCENGINE_ARK_BASE_URL,
+            "ark_model": VOLCENGINE_ARK_MODEL,
+            "ark_realtime_fallback": VOLCENGINE_ARK_REALTIME_FALLBACK,
+            "realtime_max_tokens": REALTIME_LLM_MAX_TOKENS,
+            "realtime_timeout_seconds": REALTIME_LLM_TIMEOUT_SECONDS,
+        }
 
     async def reply(
         self,
@@ -361,14 +402,62 @@ class LLMClient:
         mode: str = "chat",
         max_tokens: Optional[int] = None,
     ) -> str:
+        result = await self.reply_result(
+            text,
+            conversation_id,
+            persona,
+            mode=mode,
+            max_tokens=max_tokens,
+        )
+        return result.text
+
+    async def reply_result(
+        self,
+        text: str,
+        conversation_id: str,
+        persona: str,
+        *,
+        mode: str = "chat",
+        max_tokens: Optional[int] = None,
+    ) -> LLMReply:
+        if mode == "realtime" and self.ark_api_key:
+            try:
+                return await asyncio.wait_for(
+                    self._reply_with_ark(text, conversation_id, persona, max_tokens=max_tokens),
+                    timeout=REALTIME_LLM_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Volcengine Ark realtime LLM exceeded %.2fs", REALTIME_LLM_TIMEOUT_SECONDS)
+                metrics_store.record("realtime_llm_timeout", REALTIME_LLM_TIMEOUT_SECONDS * 1000, {"provider": "volcengine_ark"})
+                return LLMReply(
+                    text="",
+                    provider="volcengine_ark_timeout",
+                    fallback_used=False,
+                    error=f"timeout>{REALTIME_LLM_TIMEOUT_SECONDS}s",
+                )
+        return await self._reply_with_deepseek(text, conversation_id, persona, mode=mode, max_tokens=max_tokens)
+
+    async def _reply_with_deepseek(
+        self,
+        text: str,
+        conversation_id: str,
+        persona: str,
+        *,
+        mode: str,
+        max_tokens: Optional[int] = None,
+    ) -> LLMReply:
         history = history_store.load(conversation_id)
-        if not self.api_key:
-            return f"我听到了：{text}。现在后端还没配置大模型 Key，所以我先用本地回复陪你。"
+        if not self.deepseek_api_key:
+            return LLMReply(
+                text=f"我听到了：{text}。现在后端还没配置大模型 Key，所以我先用本地回复陪你。",
+                provider="local_fallback",
+                fallback_used=True,
+            )
 
         try:
             from openai import AsyncOpenAI
 
-            client = AsyncOpenAI(api_key=self.api_key, base_url=DEEPSEEK_BASE_URL)
+            client = AsyncOpenAI(api_key=self.deepseek_api_key, base_url=DEEPSEEK_BASE_URL)
             messages = companion_orchestrator.build_messages(
                 user_text=text,
                 conversation_id=conversation_id,
@@ -383,10 +472,73 @@ class LLMClient:
                 max_tokens=max_tokens or (REALTIME_LLM_MAX_TOKENS if mode == "realtime" else CHAT_MAX_TOKENS),
             )
             content = response.choices[0].message.content or ""
-            return clean_text(content) or "我在听，你继续说。"
+            return LLMReply(
+                text=clean_text(content) or "我在听，你继续说。",
+                provider="deepseek",
+                fallback_used=mode == "realtime",
+            )
         except Exception as exc:
             logger.exception("LLM failed")
-            return f"我刚才有点卡住了，但我听到你说：{text}"
+            return LLMReply(
+                text=f"我刚才有点卡住了，但我听到你说：{text}",
+                provider="local_fallback",
+                fallback_used=True,
+                error=str(exc),
+            )
+
+    async def _reply_with_ark(
+        self,
+        text: str,
+        conversation_id: str,
+        persona: str,
+        *,
+        max_tokens: Optional[int] = None,
+    ) -> LLMReply:
+        history = history_store.load(conversation_id)
+        try:
+            from openai import AsyncOpenAI
+
+            client = AsyncOpenAI(api_key=self.ark_api_key, base_url=VOLCENGINE_ARK_BASE_URL)
+            messages = companion_orchestrator.build_messages(
+                user_text=text,
+                conversation_id=conversation_id,
+                persona=persona,
+                history=history,
+                mode="realtime",
+            )
+            response = await client.chat.completions.create(
+                model=VOLCENGINE_ARK_MODEL,
+                messages=messages,
+                temperature=0.55,
+                max_tokens=max_tokens or REALTIME_LLM_MAX_TOKENS,
+            )
+            content = response.choices[0].message.content or ""
+            return LLMReply(
+                text=clean_text(content) or "我在听，你继续说。",
+                provider="volcengine_ark",
+            )
+        except Exception as exc:
+            logger.exception("Volcengine Ark realtime LLM failed")
+            if VOLCENGINE_ARK_REALTIME_FALLBACK:
+                fallback = await self._reply_with_deepseek(
+                    text,
+                    conversation_id,
+                    persona,
+                    mode="realtime",
+                    max_tokens=max_tokens or REALTIME_LLM_MAX_TOKENS,
+                )
+                return LLMReply(
+                    text=fallback.text,
+                    provider=fallback.provider,
+                    fallback_used=True,
+                    error=str(exc),
+                )
+            return LLMReply(
+                text="我这边刚才没接稳，你再说一遍。",
+                provider="volcengine_ark_error",
+                fallback_used=False,
+                error=str(exc),
+            )
 
 
 class VolcengineTTSClient:
@@ -872,22 +1024,58 @@ async def volcengine_custom_llm(payload: dict[str, Any]):
     persona = payload.get("persona") or payload.get("Persona") or extra.get("persona") or DEFAULT_PERSONA
     analysis = companion_orchestrator.analyze(text)
     started = metrics_store.timer("volcengine_custom_llm")
-    reply = await llm.reply(
+    llm_result = await llm.reply_result(
         text,
         conversation_id,
         str(persona),
         mode="realtime",
         max_tokens=REALTIME_LLM_MAX_TOKENS,
     )
+    reply = llm_result.text
+    if not reply.strip():
+        elapsed = started.stop(
+            emotion=analysis.emotion,
+            provider=llm_result.provider,
+            fallback="0",
+        )
+        logger.warning(
+            "Volcengine CustomLLM no reply conversation=%s provider=%s elapsed=%.0fms error=%s",
+            conversation_id,
+            llm_result.provider,
+            elapsed,
+            llm_result.error,
+        )
+        return {
+            "content": "",
+            "text": "",
+            "reply": "",
+            "message": {"role": "assistant", "content": ""},
+            "emotion": analysis.emotion,
+            "emotion_label": analysis.status_label,
+            "tts": {
+                "emotion": analysis.tts_emotion,
+                "speed": analysis.tts_speed,
+            },
+            "llm_provider": llm_result.provider,
+            "llm_fallback": False,
+            "llm_error": llm_result.error,
+            "finish": True,
+        }
     recorded = companion_orchestrator.record_turn(
         conversation_id=conversation_id,
         user_text=text,
         assistant_text=reply,
     )
-    started.stop(emotion=recorded.emotion)
+    started.stop(
+        emotion=recorded.emotion,
+        provider=llm_result.provider,
+        fallback="1" if llm_result.fallback_used else "0",
+    )
     logger.info(
-        "Volcengine CustomLLM reply conversation=%s emotion=%s chars=%d",
+        "Volcengine CustomLLM reply conversation=%s provider=%s fallback=%s emotion=%s chars=%d",
         conversation_id,
+        llm_result.provider,
+        llm_result.fallback_used,
         recorded.emotion,
         len(reply),
     )
@@ -902,6 +1090,8 @@ async def volcengine_custom_llm(payload: dict[str, Any]):
             "emotion": analysis.tts_emotion,
             "speed": analysis.tts_speed,
         },
+        "llm_provider": llm_result.provider,
+        "llm_fallback": llm_result.fallback_used,
         "finish": True,
     }
 
@@ -918,6 +1108,7 @@ async def monitor_summary(window_seconds: int = 3600):
         },
         "metrics": metrics_store.summary(window_seconds=window_seconds),
         "voice": VOLCENGINE_TTS_VOICE_TYPE,
+        "llm": llm.capabilities(),
         "livekit_url": LIVEKIT_URL,
         "volcengine_rtc_configured": volc_caps["configured"],
         "volcengine_rtc": volc_caps,
@@ -1018,11 +1209,18 @@ async def prewarm():
     except Exception as exc:
         results["tts_error"] = str(exc)
 
-    if DEEPSEEK_API_KEY:
+    if DEEPSEEK_API_KEY or VOLCENGINE_ARK_API_KEY:
         try:
             llm_timer = metrics_store.timer("prewarm_llm")
-            _ = await llm.reply("只回复一个字：在", "prewarm", DEFAULT_PERSONA)
+            _ = await llm.reply(
+                "只回复一个字：在",
+                "prewarm",
+                DEFAULT_PERSONA,
+                mode="realtime" if VOLCENGINE_ARK_API_KEY else "chat",
+                max_tokens=REALTIME_LLM_MAX_TOKENS if VOLCENGINE_ARK_API_KEY else None,
+            )
             results["llm_ms"] = llm_timer.stop()
+            results["llm_provider"] = llm.realtime_provider() if VOLCENGINE_ARK_API_KEY else "deepseek"
         except Exception as exc:
             results["llm_error"] = str(exc)
 

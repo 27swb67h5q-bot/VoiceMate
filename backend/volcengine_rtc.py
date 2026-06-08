@@ -62,9 +62,15 @@ class VolcengineRTCConfig:
     asr_expire_time_ms: int
     interrupt_speech_ms: int
     history_length: int
+    llm_mode: str
+    llm_endpoint_id: str
+    llm_api_key: str
     llm_model: str
     llm_prefill: bool
     llm_thinking_type: str
+    llm_temperature: float
+    llm_top_p: float
+    llm_max_tokens: int
     tts_voice_type: str
     tts_model: str
     tts_emotion: str
@@ -82,7 +88,7 @@ class VolcengineRTCConfig:
             secret_access_key=os.environ.get("VOLCENGINE_SECRET_ACCESS_KEY", os.environ.get("VOLCENGINE_RTC_SECRET_ACCESS_KEY", "")),
             region=os.environ.get("VOLCENGINE_RTC_REGION", "cn-north-1"),
             openapi_host=os.environ.get("VOLCENGINE_RTC_OPENAPI_HOST", "rtc.volcengineapi.com"),
-            openapi_version=os.environ.get("VOLCENGINE_RTC_OPENAPI_VERSION", "2024-06-01"),
+            openapi_version=os.environ.get("VOLCENGINE_RTC_OPENAPI_VERSION", "2024-12-01"),
             business_id=os.environ.get("VOLCENGINE_RTC_BUSINESS_ID", ""),
             bot_user_id=os.environ.get("VOLCENGINE_RTC_BOT_USER_ID", "VoiceMateAI"),
             start_voice_chat=_env_bool("VOLCENGINE_RTC_START_VOICE_CHAT", False),
@@ -91,9 +97,15 @@ class VolcengineRTCConfig:
             asr_expire_time_ms=int(os.environ.get("VOLCENGINE_RTC_ASR_EXPIRE_TIME_MS", "900")),
             interrupt_speech_ms=int(os.environ.get("VOLCENGINE_RTC_INTERRUPT_SPEECH_MS", "120")),
             history_length=int(os.environ.get("VOLCENGINE_RTC_HISTORY_LENGTH", "4")),
+            llm_mode=os.environ.get("VOLCENGINE_RTC_LLM_MODE", "CustomLLM").strip() or "CustomLLM",
+            llm_endpoint_id=os.environ.get("VOLCENGINE_RTC_ARK_ENDPOINT_ID", os.environ.get("VOLCENGINE_ARK_ENDPOINT_ID", "")),
+            llm_api_key=os.environ.get("VOLCENGINE_RTC_LLM_API_KEY", os.environ.get("VOLCENGINE_ARK_API_KEY", "")),
             llm_model=os.environ.get("VOLCENGINE_RTC_LLM_MODEL", "doubao-seed-1-6-flash"),
             llm_prefill=_env_bool("VOLCENGINE_RTC_LLM_PREFILL", True),
             llm_thinking_type=os.environ.get("VOLCENGINE_RTC_LLM_THINKING_TYPE", "disabled"),
+            llm_temperature=float(os.environ.get("VOLCENGINE_RTC_LLM_TEMPERATURE", "0.55")),
+            llm_top_p=float(os.environ.get("VOLCENGINE_RTC_LLM_TOP_P", "0.8")),
+            llm_max_tokens=int(os.environ.get("VOLCENGINE_RTC_LLM_MAX_TOKENS", "48")),
             tts_voice_type=os.environ.get("VOLCENGINE_TTS_VOICE_TYPE", "zh_female_qingxinnvsheng_mars_bigtts"),
             tts_model=os.environ.get("VOLCENGINE_RTC_TTS_MODEL", os.environ.get("VOLCENGINE_TTS_MODEL", "seed-tts-2.0-expressive")),
             tts_emotion=os.environ.get("VOLCENGINE_RTC_TTS_EMOTION", "happy"),
@@ -107,6 +119,13 @@ class VolcengineRTCConfig:
     @property
     def can_call_openapi(self) -> bool:
         return bool(self.access_key_id and self.secret_access_key and self.app_id)
+
+    @property
+    def can_start_llm(self) -> bool:
+        mode = self.llm_mode.strip().lower()
+        if mode == "arkv3":
+            return bool(self.llm_endpoint_id)
+        return bool(self.custom_llm_url)
 
     @property
     def configured(self) -> bool:
@@ -211,6 +230,7 @@ class VolcengineRTCService:
             start_result = await self.start_voice_chat(
                 room_id=room_id,
                 task_id=task_id,
+                target_user_id=user_id,
                 persona=persona,
                 voice=voice,
                 speed=speed,
@@ -236,6 +256,7 @@ class VolcengineRTCService:
         *,
         room_id: str,
         task_id: str | None = None,
+        target_user_id: str | None = None,
         persona: str | None = None,
         voice: str | None = None,
         speed: float | None = None,
@@ -243,6 +264,7 @@ class VolcengineRTCService:
         body = self.build_start_voice_chat_body(
             room_id=room_id,
             task_id=task_id,
+            target_user_id=target_user_id,
             persona=persona,
             voice=voice,
             speed=speed,
@@ -266,11 +288,52 @@ class VolcengineRTCService:
         *,
         room_id: str,
         task_id: str | None = None,
+        target_user_id: str | None = None,
         persona: str | None = None,
         voice: str | None = None,
         speed: float | None = None,
     ) -> dict[str, Any]:
         task_id = task_id or f"vm-{uuid.uuid4().hex[:12]}"
+        llm_config: dict[str, Any]
+        system_messages = [
+            "你是 VoiceMate 的实时语音伴侣。回复自然、亲近、简短、有情绪；不要寒暄开场；不要括号动作、表情文字或舞台提示；一次只说一到两句。",
+            "用户情绪低落时先接住情绪；用户生气时先承认感受；用户开心时轻快回应；用户求助时直接给下一步。",
+        ]
+        if self.config.llm_mode.strip().lower() == "arkv3":
+            llm_config = {
+                "Mode": "ArkV3",
+                "EndPointId": self.config.llm_endpoint_id,
+                "APIKey": self.config.llm_api_key,
+                "ModelName": self.config.llm_model,
+                "SystemMessages": system_messages,
+                "HistoryLength": self.config.history_length,
+                "MaxTokens": self.config.llm_max_tokens,
+                "Temperature": self.config.llm_temperature,
+                "TopP": self.config.llm_top_p,
+                "ThinkingType": self.config.llm_thinking_type,
+                "Prefill": self.config.llm_prefill,
+            }
+            if not self.config.llm_api_key:
+                llm_config.pop("APIKey", None)
+        else:
+            llm_config = {
+                "Mode": "CustomLLM",
+                "CustomLLM": {
+                    "URL": self.config.custom_llm_url,
+                    "Headers": {
+                        "X-VoiceMate-Persona": persona or "",
+                    },
+                },
+                "Url": self.config.custom_llm_url,
+                "Model": self.config.llm_model,
+                "ModelName": self.config.llm_model,
+                "SystemMessages": system_messages,
+                "HistoryLength": self.config.history_length,
+                "MaxTokens": self.config.llm_max_tokens,
+                "Prefill": self.config.llm_prefill,
+                "ThinkingType": self.config.llm_thinking_type,
+            }
+
         body: dict[str, Any] = {
             "AppId": self.config.app_id,
             "RoomId": room_id,
@@ -278,6 +341,11 @@ class VolcengineRTCService:
             "BusinessId": self.config.business_id,
             "AgentConfig": {
                 "UserId": self.config.bot_user_id,
+                "TargetUserId": [target_user_id or os.environ.get("VOLCENGINE_RTC_TARGET_USER_ID", "")],
+                "TargetUserID": [target_user_id or os.environ.get("VOLCENGINE_RTC_TARGET_USER_ID", "")],
+                "WelcomeMessage": "",
+                "EnableConversationStateCallback": True,
+                "AnsMode": int(os.environ.get("VOLCENGINE_RTC_ANS_MODE", "3")),
                 "Burst": {"Enable": True},
             },
             "ASRConfig": {
@@ -289,23 +357,13 @@ class VolcengineRTCService:
             "InterruptConfig": {
                 "InterruptSpeechDuration": self.config.interrupt_speech_ms,
             },
-            "LLMConfig": {
-                "Mode": "CustomLLM",
-                "CustomLLM": {
-                    "URL": self.config.custom_llm_url,
-                    "Headers": {
-                        "X-VoiceMate-Persona": persona or "",
-                    },
-                },
-                "Model": self.config.llm_model,
-                "HistoryLength": self.config.history_length,
-                "Prefill": self.config.llm_prefill,
-                "ThinkingType": self.config.llm_thinking_type,
-            },
+            "LLMConfig": llm_config,
             "TTSConfig": {
                 "VoiceType": voice or self.config.tts_voice_type,
                 "Model": self.config.tts_model,
                 "Emotion": self.config.tts_emotion,
+                "EmotionStrength": float(os.environ.get("VOLCENGINE_RTC_TTS_EMOTION_STRENGTH", "0.72")),
+                "IgnoreBracketText": [1, 2, 3],
                 "SpeechRate": int(((speed or 1.0) - 1.0) * 100) + self.config.tts_speech_rate,
             },
             "Context": {
@@ -357,6 +415,8 @@ class VolcengineRTCService:
             "custom_llm_url": self.config.custom_llm_url,
             "missing": self.missing_requirements(),
             "latency_profile": {
+                "llm_mode": self.config.llm_mode,
+                "ark_endpoint_present": bool(self.config.llm_endpoint_id),
                 "asr_silence_time_ms": self.config.asr_silence_time_ms,
                 "asr_expire_time_ms": self.config.asr_expire_time_ms,
                 "interrupt_speech_ms": self.config.interrupt_speech_ms,
@@ -374,4 +434,9 @@ class VolcengineRTCService:
             missing.append("VOLCENGINE_RTC_TOKEN_URL or VOLCENGINE_RTC_APP_KEY")
         if self.config.start_voice_chat and not self.config.can_call_openapi:
             missing.append("VOLCENGINE_ACCESS_KEY_ID and VOLCENGINE_SECRET_ACCESS_KEY")
+        if self.config.start_voice_chat and not self.config.can_start_llm:
+            if self.config.llm_mode.strip().lower() == "arkv3":
+                missing.append("VOLCENGINE_RTC_ARK_ENDPOINT_ID")
+            else:
+                missing.append("VOLCENGINE_CUSTOM_LLM_URL")
         return missing
