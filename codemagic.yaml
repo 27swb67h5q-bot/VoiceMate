@@ -71,6 +71,33 @@ workflows:
             echo "==> Searching for WebRTC.framework anywhere in DerivedData..."
           fi
 
+          echo "==> Copying dynamic frameworks from build products..."
+          PRODUCT_DIR=$(dirname "$APP_PATH")
+          find "$PRODUCT_DIR" "$DERIVED_DATA/Build/Products/Release-iphoneos" -name "*.framework" -type d 2>/dev/null | while read -r fw; do
+            [ -d "$fw" ] || continue
+            case "$fw" in
+              "$APP_PATH/Frameworks/"*) continue ;;
+              "$APP_PATH"*) continue ;;
+            esac
+            fw_name=$(basename "$fw")
+            echo "  Embedding product framework: $fw_name"
+            rm -rf "$APP_PATH/Frameworks/$fw_name"
+            cp -Rf "$fw" "$APP_PATH/Frameworks/"
+          done
+
+          echo "==> Copying dynamic libraries from build products..."
+          find "$PRODUCT_DIR" "$DERIVED_DATA/Build/Products/Release-iphoneos" -name "*.dylib" -type f 2>/dev/null | while read -r dylib; do
+            [ -f "$dylib" ] || continue
+            case "$dylib" in
+              "$APP_PATH/Frameworks/"*) continue ;;
+              "$APP_PATH"*) continue ;;
+            esac
+            dylib_name=$(basename "$dylib")
+            echo "  Embedding product dylib: $dylib_name"
+            rm -f "$APP_PATH/Frameworks/$dylib_name"
+            cp -f "$dylib" "$APP_PATH/Frameworks/"
+          done
+
           # Ensure WebRTC.framework is present (fallback if PackageFrameworks path differs)
           if [ ! -d "$APP_PATH/Frameworks/WebRTC.framework" ]; then
             WEBRTC=$(find "$DERIVED_DATA" "$CM_BUILD_DIR/SourcePackages" -name "WebRTC.framework" -type d 2>/dev/null | head -1)
@@ -84,6 +111,34 @@ workflows:
 
           echo "==> Frameworks in .app bundle:"
           ls -la "$APP_PATH/Frameworks/" 2>/dev/null || echo "  (empty)"
+
+          echo "==> Linked libraries:"
+          otool -L "$APP_PATH/VoiceMate" || true
+
+          echo "==> Verifying @rpath framework dependencies are embedded..."
+          MISSING_DEPS="/tmp/voicemate-missing-frameworks.txt"
+          rm -f "$MISSING_DEPS"
+          otool -L "$APP_PATH/VoiceMate" | awk '/@rpath\\/.*\\.framework/ {print $1}' | while read -r dep; do
+            fw_name=$(echo "$dep" | sed -E 's#@rpath/([^/]+\\.framework)/.*#\\1#')
+            if [ ! -d "$APP_PATH/Frameworks/$fw_name" ]; then
+              echo "ERROR: Missing embedded framework required by executable: $fw_name"
+              echo "$fw_name" >> "$MISSING_DEPS"
+            fi
+          done
+          if [ -s "$MISSING_DEPS" ]; then
+            exit 1
+          fi
+
+          echo "==> Ad-hoc signing embedded code for TrollStore launch compatibility..."
+          find "$APP_PATH/Frameworks" -type f 2>/dev/null | while read -r bin; do
+            if file "$bin" | grep -q "Mach-O"; then
+              codesign --force --sign - --timestamp=none "$bin" || true
+            fi
+          done
+          find "$APP_PATH/Frameworks" -name "*.framework" -type d 2>/dev/null | while read -r fw; do
+            codesign --force --sign - --timestamp=none "$fw" || true
+          done
+          codesign --force --sign - --timestamp=none "$APP_PATH" || true
 
           # Package into IPA
           echo "==> Packaging IPA..."
